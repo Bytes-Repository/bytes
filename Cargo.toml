@@ -1,0 +1,12 @@
+[package]
+name    = "bytes"
+version = "0.7.0"
+edition = "2021"
+
+[[bin]]
+name = "bytes"
+path = "src/main.rs"
+
+[dependencies]
+hk-parser = "0.3.0"
+colored   = "=2.0.4"
