@@ -1,1 +1,105 @@
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+    fn getenv(name: string) -> string
+end
 
+pub fn hackeros_libs_base() -> string is
+    let home: string = getenv("HOME")
+    if home == "" is return "/tmp/.hackeros/H#/libs" end
+    return home + "/.hackeros/H#/libs"
+end
+
+pub fn hackeros_cache_base() -> string is
+    let home: string = getenv("HOME")
+    if home == "" is return "/tmp/.hackeros/H#/build/cache" end
+    return home + "/.hackeros/H#/build/cache"
+end
+
+fn try_mount_tmpfs(path: string) -> bool is
+    ;; Try direct mount (requires root)
+    let rc1: int = system("mount -t tmpfs -o size=512m,mode=0700 tmpfs " + path + " 2>/dev/null")
+    if rc1 == 0 is return true end
+    ;; Try unprivileged via unshare
+    let rc2: int = system("unshare --user --mount mount -t tmpfs -o size=512m tmpfs " + path + " 2>/dev/null")
+    return rc2 == 0
+end
+
+pub fn create_session_dir() -> string is
+    let base:    string = hackeros_libs_base()
+    let session: string = "session-" + to_string(proc_id())
+    let dir:     string = base + "/" + session
+
+    system("mkdir -p '" + dir + "'")
+
+    if !try_mount_tmpfs(dir) is
+        ;; Fallback: plain directory with marker
+        file_write(dir + "/.bytes-session", to_string(proc_id()))
+    end
+    return dir
+end
+
+fn cleanup_session(dir: string) is
+    system("umount '" + dir + "' 2>/dev/null || true")
+    dir_remove_all(dir)
+end
+
+;; ── IsolatedEnv ───────────────────────────────────────────────────────────────
+
+pub struct IsolatedEnv is
+    pub session_dir:  string
+    pub pkg_dir:      string
+    pub sys_deps_dir: string
+end
+
+pub fn isolated_env_new() -> IsolatedEnv is
+    let session_dir:  string = create_session_dir()
+    let pkg_dir:      string = session_dir + "/packages"
+    let sys_deps_dir: string = session_dir + "/sys-deps"
+    system("mkdir -p '" + pkg_dir + "' '" + sys_deps_dir + "'")
+    return IsolatedEnv {
+        session_dir:  session_dir,
+        pkg_dir:      pkg_dir,
+        sys_deps_dir: sys_deps_dir,
+    }
+end
+
+pub fn isolated_env_install_pkg(env: IsolatedEnv, name: string, version: string, source_url: string) -> string is
+    let pkg_path: string = env.pkg_dir + "/" + name + "-" + version
+    system("mkdir -p '" + pkg_path + "'")
+    file_write(pkg_path + "/" + name + ".h#",
+        ";; pkg: " + name + " v" + version + "\n;; source: " + source_url + "\n")
+    return pkg_path
+end
+
+pub fn isolated_env_install_sys_dep(env: IsolatedEnv, deb_name: string) -> bool is
+    let extract_dir: string = env.sys_deps_dir + "/" + deb_name
+    system("mkdir -p '" + extract_dir + "'")
+    write("  \x1b[2mfetching system dep " + deb_name + " → isolated env\x1b[0m")
+    let rc: int = system("apt-get download '" + deb_name + "' 2>/dev/null && " +
+        "dpkg-deb -x " + deb_name + "_*.deb '" + extract_dir + "' 2>/dev/null")
+    return rc == 0
+end
+
+pub fn isolated_env_drop(env: IsolatedEnv) is
+    cleanup_session(env.session_dir)
+end
+
+;; ── ViraCache (bytes package cache dir) ──────────────────────────────────────
+
+pub struct BytesCache is
+    pub base: string
+end
+
+pub fn bytes_cache_open() -> BytesCache is
+    let base: string = hackeros_cache_base()
+    system("mkdir -p '" + base + "'")
+    return BytesCache { base: base }
+end
+
+pub fn bytes_cache_path(cache: BytesCache, name: string) -> string is
+    return cache.base + "/" + name
+end
+
+pub fn bytes_cache_exists(cache: BytesCache, name: string) -> bool is
+    return dir_exists(bytes_cache_path(cache, name)) || file_exists(bytes_cache_path(cache, name))
+end
