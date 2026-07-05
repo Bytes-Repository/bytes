@@ -1,1 +1,139 @@
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+end
 
+fn collect_hsharp_files(extra: [string], extra_count: int) -> [string] is
+    if extra_count > 0 is
+        let mut result: [string] = []
+        let mut i: int = 0
+        while i < extra_count is
+            if !string_starts_with(extra[i], "--") is
+                result = array_push(result, extra[i])
+            end
+            i += 1
+        end
+        return result
+    end
+    ;; Walk from current directory
+    let tmp: string = "/tmp/bytes_fmt_files_" + to_string(proc_id()) + ".txt"
+    system("find . -name '*.h#' ! -path './build/*' ! -path './build/cache/*' | sort > " + tmp + " 2>/dev/null")
+    let content: string = file_read(tmp)
+    file_delete(tmp)
+    if content == "" is return [] end
+    let lines:   [string] = string_split(content, "\n")
+    let n:       int = array_len(lines)
+    let mut result: [string] = []
+    let mut i: int = 0
+    while i < n is
+        let l: string = string_trim(lines[i])
+        if l != "" is result = array_push(result, l) end
+        i += 1
+    end
+    return result
+end
+
+fn matches_opening(line: string) -> bool is
+    let lc: string = string_lower(string_trim(line))
+    return string_ends_with(lc, " is") || lc == "is"
+end
+
+fn matches_closing(line: string) -> bool is
+    let lc: string = string_lower(string_trim(line))
+    return lc == "end" || string_starts_with(lc, "end ") ||
+           string_starts_with(lc, "else") || string_starts_with(lc, "elsif")
+end
+
+pub fn format_source(src: string) -> string is
+    let lines:    [string] = string_split(src, "\n")
+    let n:        int      = array_len(lines)
+    let mut out:       string = ""
+    let mut indent:    int    = 0
+    let mut blank_run: int    = 0
+    let indent_str:    string = "    "
+
+    let mut i: int = 0
+    while i < n is
+        let line:    string = lines[i]
+        let trimmed: string = string_trim(line)
+
+        if trimmed == "" is
+            blank_run += 1
+            if blank_run <= 1 is out = out + "\n" end
+            i += 1
+            continue
+        end
+        blank_run = 0
+
+        ;; Decrease indent before closing keywords
+        if matches_closing(trimmed) && indent > 0 is
+            indent -= 1
+        end
+
+        ;; Build indented line
+        let mut indented: string = ""
+        let mut j: int = 0
+        while j < indent is
+            indented = indented + indent_str
+            j += 1
+        end
+        indented = indented + trimmed
+
+        ;; Strip trailing whitespace
+        out = out + string_trim_right(indented) + "\n"
+
+        ;; Increase indent after opening keywords
+        if matches_opening(trimmed) is
+            indent += 1
+        end
+
+        i += 1
+    end
+
+    ;; Ensure single trailing newline
+    let mut out: string = string_trim_right(out)
+    return out + "\n"
+end
+
+pub fn format_file(path: string) -> bool is
+    if !file_exists(path) is return false end
+    let original:  string = file_read(path)
+    let formatted: string = format_source(original)
+    if formatted == original is return false end
+    file_write(path, formatted)
+    return true
+end
+
+pub fn cmd_fmt(extra: [string], extra_count: int, verbose: bool) -> int is
+    write("")
+    write("  \x1b[1;36mbytes fmt\x1b[0m  H# Formatter")
+    write("")
+
+    let files:   [string] = collect_hsharp_files(extra, extra_count)
+    let n:       int      = array_len(files)
+
+    if n == 0 is
+        write("  \x1b[2mNo .h# files found.\x1b[0m")
+        return 0
+    end
+
+    let mut changed:   int = 0
+    let mut unchanged: int = 0
+    let mut i: int = 0
+
+    while i < n is
+        let file: string = files[i]
+        if format_file(file) is
+            changed += 1
+            write("  \x1b[36medited\x1b[0m " + file)
+        else is
+            if verbose is write("  \x1b[2m  ok   \x1b[0m " + file) end
+            unchanged += 1
+        end
+        i += 1
+    end
+
+    write("")
+    write("  \x1b[32m✓\x1b[0m  " + to_string(changed) + " file(s) formatted, " +
+          to_string(unchanged) + " unchanged")
+    return 0
+end
