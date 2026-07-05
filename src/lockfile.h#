@@ -1,4 +1,4 @@
-pub struct LockedPkg i
+pub struct LockedPkg is
     pub name:     string
     pub version:  string
     pub url:      string
