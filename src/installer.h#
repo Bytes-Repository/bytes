@@ -1,1 +1,186 @@
+mod config
+mod lockfile
+mod registry
+mod progress
 
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+end
+
+fn pkg_cache_dir() -> string is return "build/cache/packages" end
+fn py_cache_dir()  -> string is return "build/cache/pyenv"    end
+
+pub fn install_all(proj: config::Project, release: bool, verbose: bool) -> bool is
+    let ok_hsh: bool = install_hsharp_deps(proj, verbose)
+    let ok_py:  bool = install_python_deps(proj, verbose)
+    return ok_hsh && ok_py
+end
+
+;; ── H# zależności ─────────────────────────────────────────────────────────────
+
+fn install_hsharp_deps(proj: config::Project, verbose: bool) -> bool is
+    if proj.dep_count == 0 is return true end
+
+    if !dir_exists(pkg_cache_dir()) is dir_create(pkg_cache_dir()) end
+
+    write("  \x1b[2mFetching " + to_string(proj.dep_count) + " dependency(ies)...\x1b[0m")
+
+    let mut lf:     lockfile::LockFile = lockfile::lockfile_read()
+    let mut bar:    progress::ProgressBar = progress::bar_new(proj.dep_count, "default", "deps")
+    let mut failed: int  = 0
+    let mut i:      int  = 0
+
+    while i < proj.dep_count is
+        let dep: config::DepEntry = proj.deps[i]
+
+        ;; Check cache first
+        let cached_path: string = pkg_cache_dir() + "/" + dep.name
+        let locked: lockfile::LockedPkg = lockfile::lockfile_get(lf, dep.name)
+
+        if locked.name != "" && dir_exists(cached_path) is
+            if verbose is write("  \x1b[2m" + dep.name + " (cached)\x1b[0m") end
+            bar = progress::bar_inc(bar, 1)
+            i += 1
+            continue
+        end
+
+        ;; Fetch from registry or git
+        let ok: bool = match dep.kind is
+            "git" => is install_git_dep(dep.name, dep.source, cached_path, verbose) end
+            "bytes" => is install_bytes_dep(dep.name, cached_path, verbose) end
+            "dynamic" | "static" => is
+                ;; System library — verify with pkg-config, no download needed
+                if verbose is write("  \x1b[2m" + dep.name + " (system lib)\x1b[0m") end
+                true
+            end
+            _ => is
+                if verbose is write("  \x1b[2m" + dep.name + " (unknown kind " + dep.kind + ")\x1b[0m") end
+                true
+            end
+        end
+
+        if ok is
+            lf = lockfile::lockfile_lock(lf, dep.name, dep.source, dep.source, "")
+        else is
+            write("  \x1b[33mwarn:\x1b[0m  failed to fetch " + dep.name)
+            failed += 1
+        end
+
+        bar = progress::bar_inc(bar, 1)
+        i += 1
+    end
+
+    lockfile::lockfile_write(lf)
+    progress::bar_finish(bar, to_string(proj.dep_count - failed) + " package(s) ready")
+
+    return failed == 0
+end
+
+fn install_git_dep(name: string, url: string, target: string, verbose: bool) -> bool is
+    if dir_exists(target) is
+        if verbose is write("  \x1b[2m" + name + " (git cached)\x1b[0m") end
+        return true
+    end
+    let cmd: string = "git clone --depth=1 '" + url + "' '" + target + "' 2>/dev/null"
+    if verbose is write("  \x1b[2m$ " + cmd + "\x1b[0m") end
+    return system(cmd) == 0
+end
+
+fn install_bytes_dep(name: string, target: string, verbose: bool) -> bool is
+    ;; Fetch registry and look up package
+    let reg: registry::Registry = registry::registry_load_cached()
+    let entry: registry::RegEntry = registry::registry_find(reg, name)
+
+    if entry.name == "" is
+        ;; Create stub .h# file so compilation can proceed
+        let stub: string = pkg_cache_dir() + "/" + name + ".h#"
+        file_write(stub, ";; bytes stub: " + name + "\n;; Install via: bytes add " + name + "\n")
+        write("  \x1b[33mwarn:\x1b[0m '" + name + "' not in registry, stub created")
+        return true
+    end
+
+    return install_git_dep(name, entry.git, target, verbose)
+end
+
+;; ── Python zależności ─────────────────────────────────────────────────────────
+
+fn install_python_deps(proj: config::Project, verbose: bool) -> bool is
+    ;; Python deps are specified as: [python] section in bytes.hk (future)
+    ;; For now: no-op, return true
+    return true
+end
+
+;; ── add / remove (runtime) ────────────────────────────────────────────────────
+
+pub fn cmd_add(name: string, kind: string, source: string, verbose: bool) -> int is
+    ;; 1. Add to bytes.hk
+    let hk_path: string = config::find_hk()
+    if hk_path == "" is
+        write("  \x1b[31merror:\x1b[0m bytes.hk not found")
+        return 1
+    end
+
+    let content: string = file_read(hk_path)
+    let has_deps: bool = string_contains(content, "[deps]")
+    let dep_line: string = "-> " + name + " => " + if source != "" then source else kind 
+
+    let new_content: string = if has_deps is
+        string_replace(content, "[deps]", "[deps]\n" + dep_line)
+    else is
+        content + "\n[deps]\n" + dep_line + "\n"
+    end
+
+    file_write(hk_path, new_content)
+    write("  \x1b[32m✓\x1b[0m  added: " + name +
+          if kind != "" then " [" + kind + "]" else "" )
+
+    ;; 2. If git dep, install immediately
+    if kind == "git" || string_starts_with(source, "http") is
+        let target: string = pkg_cache_dir() + "/" + name
+        if !dir_exists(pkg_cache_dir()) is dir_create(pkg_cache_dir()) end
+        install_git_dep(name, source, target, verbose)
+    end
+
+    write("  Run 'bytes build' to compile")
+    return 0
+end
+
+pub fn cmd_remove_dep(name: string) -> int is
+    let hk_path: string = config::find_hk()
+    if hk_path == "" is
+        write("  \x1b[31merror:\x1b[0m bytes.hk not found")
+        return 1
+    end
+
+    let content: string = file_read(hk_path)
+    let lines:   [string] = string_split(content, "\n")
+    let n:       int = array_len(lines)
+    let mut new_content: string = ""
+    let mut removed: bool = false
+    let mut i: int = 0
+
+    while i < n is
+        let key: string = config::hk_parse_key(lines[i])
+        if key == name && string_starts_with(string_trim(lines[i]), "->") is
+            removed = true
+        else is
+            new_content = new_content + lines[i] + "\n"
+        end
+        i += 1
+    end
+
+    if !removed is
+        write("  \x1b[33mwarn:\x1b[0m '" + name + "' not found in [deps]")
+        return 1
+    end
+
+    file_write(hk_path, new_content)
+
+    ;; Also remove from lockfile
+    let mut lf: lockfile::LockFile = lockfile::lockfile_read()
+    lf = lockfile::lockfile_unlock(lf, name)
+    lockfile::lockfile_write(lf)
+
+    write("  \x1b[32m✓\x1b[0m  removed: " + name)
+    return 0
+end
