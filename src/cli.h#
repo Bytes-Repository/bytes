@@ -1,1 +1,501 @@
+mod config
+mod workspace
+mod jit
+mod progress
+mod installer
+mod registry
+mod lockfile
+mod fmt_cmd
+mod test_runner
+mod doc_gen
+mod isolation
+mod python_interop
 
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+    fn exit(code: int)
+end
+
+fn find_hsh() -> string is
+    let bins: [string] = ["h#", "/usr/bin/h#", "hsharp"]
+    for b in bins is
+        if system("command -v " + b + " >/dev/null 2>&1") == 0 is return b end
+    end
+    return "h#"
+end
+
+;; ── Argument helpers ──────────────────────────────────────────────────────────
+
+fn arg_at(args: [string], argc: int, i: int) -> string is
+    if i < argc is return args[i] end
+    return ""
+end
+
+fn arg_has(args: [string], argc: int, flag: string) -> bool is
+    let mut i: int = 0
+    while i < argc is
+        if args[i] == flag is return true end
+        i += 1
+    end
+    return false
+end
+
+fn args_from(args: [string], argc: int, start_idx: int) -> [string] is
+    let mut result: [string] = []
+    let mut i: int = start_idx
+    while i < argc is
+        result = array_push(result, args[i])
+        i += 1
+    end
+    return result
+end
+
+fn args_positional(args: [string], argc: int) -> [string] is
+    let mut result: [string] = []
+    let mut i: int = 0
+    while i < argc is
+        if !string_starts_with(args[i], "-") is
+            result = array_push(result, args[i])
+        end
+        i += 1
+    end
+    return result
+end
+
+;; ── Help ─────────────────────────────────────────────────────────────────────
+
+pub fn print_header() is
+    write("")
+    write("  \x1b[1mbytes\x1b[0m  H# Package Manager")
+    write("  \x1b[2mv0.8.0\x1b[0m  build • run • deps • workspaces")
+    write("")
+end
+
+pub fn print_version() is
+    print_header()
+end
+
+pub fn print_help() is
+    print_header()
+    write("  \x1b[1mUsage:\x1b[0m  bytes <command> [options]")
+    write("")
+    write("  \x1b[1mProject commands:\x1b[0m")
+    write("    \x1b[36mnew\x1b[0m       <name> [--lib]          create new project")
+    write("    \x1b[36mnew-ws\x1b[0m    <name> [--special]      create workspace")
+    write("    \x1b[36mbuild\x1b[0m     [--release] [-v]        compile project")
+    write("    \x1b[36mrun\x1b[0m       [--release] [-- args]   build and run")
+    write("    \x1b[36mcheck\x1b[0m     [-v]                    type-check only")
+    write("    \x1b[36mclean\x1b[0m     [--everything]          remove build/")
+    write("    \x1b[36mtest\x1b[0m      [filter]                run #[test] blocks")
+    write("    \x1b[36mfmt\x1b[0m       [files...]              format .h# files")
+    write("    \x1b[36mdoc\x1b[0m       [out-dir]               generate HTML docs")
+    write("")
+    write("  \x1b[1mDependency commands:\x1b[0m")
+    write("    \x1b[36madd\x1b[0m       <pkg> [version]         add dependency")
+    write("    \x1b[36mremove\x1b[0m    <pkg>                   remove dependency")
+    write("    \x1b[36minstall\x1b[0m                           install all deps")
+    write("    \x1b[36mupdate\x1b[0m                            update all deps")
+    write("    \x1b[36msearch\x1b[0m    <query>                 search registry")
+    write("    \x1b[36minfo\x1b[0m      <pkg>                   package information")
+    write("    \x1b[36mlist\x1b[0m                              list installed deps")
+    write("    \x1b[36mpython\x1b[0m    <pkg>                   add Python package")
+    write("")
+    write("  \x1b[1mWorkspace:\x1b[0m")
+    write("    \x1b[36mworkspace\x1b[0m | ws   info|build|list  workspace commands")
+    write("")
+    write("  \x1b[1mUtilities:\x1b[0m")
+    write("    \x1b[36mcache\x1b[0m                             cache information")
+    write("    \x1b[36mlangs\x1b[0m                             supported languages")
+    write("    \x1b[36m--version\x1b[0m | -V                   show version")
+    write("")
+    write("  \x1b[2mFlags: --release (-r)  --verbose (-v)  --file (-f) <file>\x1b[0m")
+    write("")
+end
+
+;; ── Commands ──────────────────────────────────────────────────────────────────
+
+fn cmd_new(name: string, is_lib: bool, is_ws: bool) is
+    if name == "" is
+        write("  \x1b[31merror:\x1b[0m Usage: bytes new <name>")
+        exit(1)
+    end
+    if dir_exists(name) is
+        write("  \x1b[31merror:\x1b[0m directory '" + name + "' already exists")
+        exit(1)
+    end
+
+    dir_create(name)
+    dir_create(name + "/src")
+    dir_create(name + "/build")
+    dir_create(name + "/build/cache")
+    dir_create(name + "/tests")
+    dir_create(name + "/docs")
+
+    if is_ws is
+        file_write(name + "/bytes.hk", config::tpl_workspace(name))
+        dir_create(name + "/" + name + "-core/src")
+        file_write(name + "/" + name + "-core/bytes.hk",
+            "[package]\n-> name => " + name + "-core\n-> version => 0.1.0\n\n" +
+            "[build]\n-> lang  => h#\n-> entry => src/main.h#\n")
+        file_write(name + "/" + name + "-core/src/main.h#", config::tpl_main(name + "-core"))
+    else if is_lib is
+        file_write(name + "/bytes.hk", config::tpl_lib_hk(name))
+        file_write(name + "/src/lib.h#", config::tpl_lib_source(name))
+    else is
+        file_write(name + "/bytes.hk", config::tpl_package(name))
+        file_write(name + "/src/main.h#", config::tpl_main(name))
+    end
+
+    file_write(name + "/.gitignore", config::tpl_gitignore())
+
+    write("  \x1b[32mCreated:\x1b[0m \x1b[1m" + name + "\x1b[0m" +
+          if is_ws then " (workspace)" else if is_lib then " (library)" else " (binary)"  )
+    write("  \x1b[2mEntry:  \x1b[0m " + if is_lib then "src/lib.h#" else "src/main.h#" )
+    write("  \x1b[2mConfig: \x1b[0m bytes.hk")
+    write("")
+    write("  \x1b[1mNext:\x1b[0m  cd " + name + " && bytes run")
+    write("")
+end
+
+fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool) is
+    print_header()
+    let proj: config::Project = config::load()
+
+    if proj.has_workspace is
+        ;; Set workspace root for member builds
+        let cwd: string = if system("pwd >/tmp/bytes_cwd.txt 2>&1") == 0 then
+            string_trim(file_read("/tmp/bytes_cwd.txt"))
+        else "."
+        system("export BYTES_WORKSPACE_ROOT=" + cwd)
+        let rc: int = workspace::build_workspace(proj, release, verbose)
+        if rc != 0 is exit(rc) end
+        return
+    end
+
+    ;; Single project build
+    let entry: string = if extra_count > 0 && !string_starts_with(extra[0], "-") then
+        extra[0]
+    else config::build_entry(proj)
+
+    let out:   string = config::build_output(proj)
+    let hsh:   string = find_hsh()
+
+    if !dir_exists("build") is dir_create("build") end
+    if !dir_exists("build/cache") is dir_create("build/cache") end
+
+    ;; Install deps first
+    if proj.dep_count > 0 is
+        let cache: isolation::BytesCache = isolation::bytes_cache_open()
+        installer::install_all(proj, release, verbose)
+    end
+
+    ;; Check for --emit flag
+    let mut emit_arg: string = ""
+    let emit: string = proj.build.emit
+    if emit != "" && emit != "bin" is emit_arg = " --emit " + emit end
+
+    ;; Build flags from bytes.hk [build] -> flags
+    let extra_flags: string = if proj.build.flags != "" then " " + proj.build.flags else "" 
+
+    let mut cmd: string = hsh + " compile " + entry + " -o " + out + emit_arg + extra_flags
+    if release is cmd = cmd + " --release" end
+    if verbose is cmd = cmd + " --verbose" end
+
+    write("  \x1b[2mBuilding \x1b[0m\x1b[1m" + config::pkg_name(proj) +
+          "\x1b[0m v" + config::pkg_version(proj) +
+          if release then " \x1b[33m(release)\x1b[0m" else "" )
+    write("")
+
+    let t0: int = time_ms()
+    let rc: int = system(cmd)
+    let elapsed: int = time_ms() - t0
+
+    if rc == 0 is
+        write("  \x1b[32m✓\x1b[0m  " + out + "  \x1b[2m(" + progress::elapsed_str(elapsed) + ")\x1b[0m")
+    else is
+        write("  \x1b[31merror:\x1b[0m build failed (" + progress::elapsed_str(elapsed) + ")")
+        if !release is
+            write("  \x1b[2mhint: try 'bytes build --release' for full LLVM diagnostics\x1b[0m")
+        end
+        exit(1)
+    end
+    write("")
+end
+
+fn cmd_run(file: string, run_args: [string], run_argc: int, release: bool, verbose: bool) is
+    if file != "" && !file_exists(file) is
+        write("  \x1b[31merror:\x1b[0m file not found: " + file)
+        exit(1)
+    end
+
+    let proj:    config::Project = config::load()
+    let entry:   string = if file != "" then file else config::build_entry(proj) 
+    let out:     string = config::build_output(proj)
+    let hsh:     string = find_hsh()
+    let mut cmd: string = hsh + " compile " + entry + " -o " + out
+
+    if release is cmd = cmd + " --release" end
+
+    if !dir_exists("build") is dir_create("build") end
+    if !dir_exists("build/cache") is dir_create("build/cache") end
+
+    let rc: int = system(cmd)
+    if rc != 0 is
+        write("  \x1b[31merror:\x1b[0m compilation failed")
+        exit(1)
+    end
+
+    write("  \x1b[2mRunning " + out + "\x1b[0m\n")
+
+    let mut run_cmd: string = "./" + out
+    let mut i: int = 0
+    while i < run_argc is
+        run_cmd = run_cmd + " " + run_args[i]
+        i += 1
+    end
+    let run_rc: int = system(run_cmd)
+    exit(run_rc)
+end
+
+fn cmd_check(extra: [string], extra_count: int, verbose: bool) is
+    let proj:  config::Project = config::load()
+    let hsh:   string = find_hsh()
+    let entry: string = if extra_count > 0 && !string_starts_with(extra[0], "-") then
+        extra[0]
+    else config::build_entry(proj)
+
+    write("  \x1b[2mChecking \x1b[0m" + entry)
+    let t0:  int = time_ms()
+    let rc:  int = system(hsh + " check " + entry)
+    let ms:  int = time_ms() - t0
+
+    if rc == 0 is
+        write("  \x1b[32m✓\x1b[0m  no errors  \x1b[2m(" + progress::elapsed_str(ms) + ")\x1b[0m")
+    end
+    if rc != 0 is exit(rc) end
+end
+
+fn cmd_clean(everything: bool) is
+    if dir_exists("build") is
+        dir_remove_all("build")
+        write("  \x1b[32m✓\x1b[0m  cleaned build/")
+    end
+    if everything is
+        system("rm -f bytes.lock 2>/dev/null")
+        write("  \x1b[32m✓\x1b[0m  removed bytes.lock")
+    end
+end
+
+fn cmd_add(pkg: string, version: string, release: bool) is
+    print_header()
+    write("  \x1b[2mAdding\x1b[0m \x1b[33m" + pkg + "\x1b[0m to project...")
+
+    let kind:   string = if string_starts_with(pkg, "http") || string_starts_with(pkg, "git") then "git"
+                          else "bytes"
+    let source: string = if kind == "git" then pkg else version 
+
+    installer::cmd_add(pkg, kind, source, release)
+end
+
+fn cmd_remove(pkg: string) is
+    print_header()
+    installer::cmd_remove_dep(pkg)
+end
+
+fn cmd_install(verbose: bool, release: bool) is
+    print_header()
+    let proj: config::Project = config::load()
+
+    if proj.dep_count == 0 is
+        write("  \x1b[2mNothing to install.\x1b[0m")
+        return
+    end
+
+    installer::install_all(proj, release, verbose)
+end
+
+fn cmd_update() is
+    print_header()
+    write("  \x1b[2mUpdating registry cache...\x1b[0m")
+    ;; Force fresh registry fetch
+    if file_exists("build/cache/registry-index.json") is
+        file_delete("build/cache/registry-index.json")
+    end
+    let reg: registry::Registry = registry::registry_fetch()
+    write("  \x1b[32m✓\x1b[0m  Registry updated (" + to_string(reg.count) + " packages)")
+    write("")
+    write("  Run 'bytes install' to reinstall dependencies")
+end
+
+fn cmd_list() is
+    print_header()
+    let proj: config::Project = config::load()
+
+    write("  \x1b[1mDependencies:\x1b[0m " + config::pkg_name(proj) + " v" + config::pkg_version(proj))
+    write("")
+
+    if proj.dep_count == 0 is
+        write("  \x1b[2m(no dependencies)\x1b[0m")
+        write("")
+        return
+    end
+
+    let mut i: int = 0
+    while i < proj.dep_count is
+        let dep: config::DepEntry = proj.deps[i]
+        let kind_col: string = match dep.kind is
+            "dynamic" => "\x1b[36mdynamic\x1b[0m"
+            "static"  => "\x1b[33mstatic\x1b[0m"
+            "git"     => "\x1b[35mgit\x1b[0m"
+            _         => "\x1b[32mbytes\x1b[0m"
+        end
+        write("  " + string_pad_right(dep.name, 24) + " " + kind_col +
+              if dep.source != dep.kind && dep.source != "" then
+                "  \x1b[2m" + dep.source + "\x1b[0m"
+              else "" end)
+        i += 1
+    end
+    write("")
+end
+
+fn cmd_search(query: string) is
+    print_header()
+    write("  \x1b[2mSearching registry for '" + query + "'...\x1b[0m")
+    let reg: registry::Registry = registry::registry_load_cached()
+    let results: [registry::RegEntry] = registry::registry_search(reg, query)
+    let n: int = array_len(results)
+
+    if n == 0 is
+        write("  \x1b[2mNo packages found for '" + query + "'\x1b[0m")
+        write("")
+        return
+    end
+
+    write("  \x1b[1m" + to_string(n) + " package(s) found:\x1b[0m")
+    write("")
+    let mut i: int = 0
+    while i < n is
+        let p: registry::RegEntry = results[i]
+        write("  \x1b[36m" + string_pad_right(p.name, 24) + "\x1b[0m  " + p.git)
+        i += 1
+    end
+    write("")
+end
+
+fn cmd_info_pkg(pkg: string) is
+    print_header()
+    let reg:   registry::Registry = registry::registry_load_cached()
+    let entry: registry::RegEntry = registry::registry_find(reg, pkg)
+
+    if entry.name == "" is
+        write("  \x1b[31merror:\x1b[0m package '" + pkg + "' not found in registry")
+        write("  Try: bytes search " + pkg)
+        exit(1)
+    end
+
+    write("  \x1b[1m" + entry.name + "\x1b[0m")
+    write("  \x1b[2mSource:\x1b[0m  " + entry.git)
+    write("  \x1b[2mVersion:\x1b[0m " + entry.version)
+    write("")
+    write("  bytes add " + entry.name)
+    write("")
+end
+
+fn cmd_python_pkg(pkg: string, version: string) is
+    print_header()
+    write("  \x1b[2mInstalling Python package: \x1b[0m" + pkg)
+    let cache_dir: string = "build/cache"
+    if !dir_exists(cache_dir) is dir_create(cache_dir) end
+    let pkgs: [string] = [pkg]
+    let ok: bool = python_interop::setup_python_deps(pkgs, 1, "3", cache_dir + "/pyenv")
+    if ok is
+        write("  \x1b[32m✓\x1b[0m  " + pkg + if version != "" then "@" + version else "" )
+    else is
+        write("  \x1b[33mwarn:\x1b[0m install may have failed, check pip output above")
+    end
+end
+
+fn cmd_workspace(sub: string, extra: [string], extra_count: int, release: bool, verbose: bool) is
+    match sub is
+        "info" | "status" => is
+            print_header()
+            let proj: config::Project = config::load()
+            if !proj.has_workspace is
+                write("  \x1b[2mNot a workspace (no [workspace] in bytes.hk)\x1b[0m")
+                return
+            end
+            write("  \x1b[1mWorkspace:\x1b[0m " + proj.workspace.name + " v" + proj.workspace.version)
+            write("  \x1b[2mMode:\x1b[0m      " + proj.workspace.mode)
+            let members: [string] = config::ws_members(proj)
+            let n: int = array_len(members)
+            write("  \x1b[2mMembers (" + to_string(n) + "):\x1b[0m")
+            let mut i: int = 0
+            while i < n is
+                let m:    string = members[i]
+                let lang: string = config::ws_member_lang(proj, m)
+                write("    \x1b[36m" + string_pad_right(m, 20) + "\x1b[0m  " + lang)
+                i += 1
+            end
+            write("")
+        end
+        "build" => is
+            cmd_build(extra, extra_count, release, verbose)
+        end
+        "list" => is
+            print_header()
+            let proj: config::Project = config::load()
+            let members: [string] = config::ws_members(proj)
+            let n: int = array_len(members)
+            let mut i: int = 0
+            while i < n is
+                let m:    string = members[i]
+                let lang: string = config::ws_member_lang(proj, m)
+                let built: bool  = file_exists(m + "/build/main")
+                let sym: string = if built then "\x1b[32m✓\x1b[0m" else "\x1b[2m○\x1b[0m" 
+                write("  " + sym + " " + string_pad_right(m, 20) + "  \x1b[2m" + lang + "\x1b[0m")
+                i += 1
+            end
+            write("")
+        end
+        _ => is
+            write("  \x1b[31merror:\x1b[0m Unknown workspace subcommand: " + sub)
+            write("  Available: info build list")
+        end
+    end
+end
+
+fn cmd_cache_info() is
+    print_header()
+    let base: string = isolation::hackeros_cache_base()
+    write("  \x1b[1mBytes cache:\x1b[0m")
+    write("    \x1b[2mGlobal:\x1b[0m  " + base)
+    write("    \x1b[2mLocal:\x1b[0m   build/cache/")
+    write("")
+    system("du -sh " + base + " 2>/dev/null | awk '{print \"    Global size: \" $1}'")
+    system("du -sh build/cache/ 2>/dev/null | awk '{print \"    Local size:  \" $1}'")
+    write("")
+end
+
+fn cmd_langs() is
+    print_header()
+    write("  \x1b[1mSupported languages in workspace-special:\x1b[0m")
+    write("")
+    let langs: [[string]] = [
+        ["h#",     "H# (H-Sharp)  — primary language"],
+        ["rust",   "Rust          — cargo build"],
+        ["c++",    "C++           — g++/clang++"],
+        ["c",      "C             — gcc/clang"],
+        ["odin",   "Odin          — odin build"],
+        ["zig",    "Zig           — zig build"],
+        ["crystal","Crystal       — crystal build"],
+        ["go",     "Go            — go build"],
+        ["python", "Python        — syntax check only"],
+    ]
+    let n: int = array_len(langs)
+    let mut i: int = 0
+    while i < n is
+        write("    \x1b[36m" + string_pad_right(langs[i][0], 10) + "\x1b[0m  " + langs[i][1])
+        i += 1
+    end
+    write("")
+end
