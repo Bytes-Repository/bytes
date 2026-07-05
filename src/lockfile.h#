@@ -1,0 +1,140 @@
+pub struct LockedPkg is
+    pub name:     string
+    pub version:  string
+    pub url:      string
+    pub checksum: string
+end
+
+pub struct LockFile is
+    pub packages:   [LockedPkg]
+    pub pkg_count:  int
+    pub version:    int
+end
+
+fn lock_path() -> string is return "bytes.lock" end
+
+pub fn lockfile_read() -> LockFile is
+    if !file_exists(lock_path()) is
+        return LockFile { packages: [], pkg_count: 0, version: 1 }
+    end
+    let content: string = file_read(lock_path())
+    return parse_lockfile(content)
+end
+
+fn parse_lockfile(json: string) -> LockFile is
+    let mut pkgs:  [LockedPkg] = []
+    let mut count: int         = 0
+
+    ;; Find "packages" object
+    let pkg_idx: int = string_find(json, "\"packages\"")
+    if pkg_idx < 0 is return LockFile { packages: [], pkg_count: 0, version: 1 } end
+
+    ;; Simple parse: extract each "name":{ ... } block
+    let after: string = string_slice(json, pkg_idx + 10, string_len(json))
+    let brace: int    = string_find(after, "{")
+    if brace < 0 is return LockFile { packages: [], pkg_count: 0, version: 1 } end
+
+    let inner: string = string_slice(after, brace + 1, string_len(after))
+    let lines: [string] = string_split(inner, "\"")
+    let n: int = array_len(lines)
+    let mut i: int = 0
+
+    while i + 2 < n is
+        let name: string = string_trim(lines[i])
+        ;; Skip empty, punctuation tokens
+        if string_len(name) > 0 && !string_starts_with(name, "{") &&
+           !string_starts_with(name, "}") && !string_starts_with(name, ",") &&
+           !string_starts_with(name, ":") is
+
+            let block_start: int = string_find(inner, "\"" + name + "\"")
+            if block_start >= 0 is
+                let after_name: string = string_slice(inner, block_start + string_len(name) + 2, string_len(inner))
+                let ob: int = string_find(after_name, "{")
+                let cb: int = string_find(after_name, "}")
+                if ob >= 0 && cb > ob is
+                    let block: string = string_slice(after_name, ob, cb + 1)
+                    let ver: string = extract_json_str(block, "version")
+                    let url: string = extract_json_str(block, "url")
+                    let cks: string = extract_json_str(block, "checksum")
+                    pkgs  = array_push(pkgs, LockedPkg {
+                        name: name, version: ver, url: url, checksum: cks
+                    })
+                    count += 1
+                end
+            end
+        end
+        i += 2
+    end
+
+    return LockFile { packages: pkgs, pkg_count: count, version: 1 }
+end
+
+fn extract_json_str(obj: string, key: string) -> string is
+    let search: string = "\"" + key + "\":"
+    let idx: int = string_find(obj, search)
+    if idx < 0 is return "" end
+    let after: string = string_trim(string_slice(obj, idx + string_len(search), string_len(obj)))
+    if !string_starts_with(after, "\"") is return "" end
+    let inner: string = string_slice(after, 1, string_len(after))
+    let end_q: int    = string_find(inner, "\"")
+    if end_q < 0 is return "" end
+    return string_slice(inner, 0, end_q)
+end
+
+pub fn lockfile_write(lf: LockFile) is
+    let mut out: string = "{\n  \"version\": " + to_string(lf.version) + ",\n  \"packages\": {\n"
+    let mut i: int = 0
+    while i < lf.pkg_count is
+        let p: LockedPkg = lf.packages[i]
+        let comma: string = if i < lf.pkg_count - 1 then "," else "" 
+        out = out + "    \"" + p.name + "\": {\n" +
+              "      \"version\": \""  + p.version  + "\",\n" +
+              "      \"url\": \""      + p.url       + "\",\n" +
+              "      \"checksum\": \"" + p.checksum + "\"\n" +
+              "    }" + comma + "\n"
+        i += 1
+    end
+    out = out + "  }\n}\n"
+    file_write(lock_path(), out)
+end
+
+pub fn lockfile_lock(lf: LockFile, name: string, version: string, url: string, checksum: string) -> LockFile is
+    ;; Update existing or add new
+    let mut pkgs:  [LockedPkg] = []
+    let mut found: bool = false
+    let mut i: int = 0
+    while i < lf.pkg_count is
+        if lf.packages[i].name == name is
+            pkgs  = array_push(pkgs, LockedPkg { name: name, version: version, url: url, checksum: checksum })
+            found = true
+        else is
+            pkgs = array_push(pkgs, lf.packages[i])
+        end
+        i += 1
+    end
+    if !found is
+        pkgs = array_push(pkgs, LockedPkg { name: name, version: version, url: url, checksum: checksum })
+    end
+    return LockFile { packages: pkgs, pkg_count: array_len(pkgs), version: lf.version }
+end
+
+pub fn lockfile_unlock(lf: LockFile, name: string) -> LockFile is
+    let mut pkgs: [LockedPkg] = []
+    let mut i: int = 0
+    while i < lf.pkg_count is
+        if lf.packages[i].name != name is
+            pkgs = array_push(pkgs, lf.packages[i])
+        end
+        i += 1
+    end
+    return LockFile { packages: pkgs, pkg_count: array_len(pkgs), version: lf.version }
+end
+
+pub fn lockfile_get(lf: LockFile, name: string) -> LockedPkg is
+    let mut i: int = 0
+    while i < lf.pkg_count is
+        if lf.packages[i].name == name is return lf.packages[i] end
+        i += 1
+    end
+    return LockedPkg { name: "", version: "", url: "", checksum: "" }
+end
