@@ -1,1 +1,73 @@
+mod config
 
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+end
+
+pub struct JitCache is
+    pub dir:     string
+    pub enabled: bool
+end
+
+pub fn jit_cache_new(proj: config::Project) -> JitCache is
+    let cache: string = proj.build.cache_dir
+    if !dir_exists(cache) is dir_create(cache) end
+    return JitCache { dir: cache, enabled: true }
+end
+
+pub fn jit_run(file: string, args: [string], argc: int, cache: JitCache) -> int is
+    ;; Build cache key from file path + mtime
+    let cache_key: string = string_replace(string_replace(file, "/", "_"), ".", "_")
+    let bc_path:   string = cache.dir + "/" + cache_key + ".h#bc"
+
+    ;; Check if cached bytecode exists and is newer than source
+    let need_compile: bool = !file_exists(bc_path)
+
+    ;; Compile to bytecode cache if needed
+    if need_compile is
+        let hsh: string = find_hsh()
+        let compile_cmd: string = hsh + " compile " + file + " -o " + bc_path + " --emit obj 2>/dev/null"
+        let rc: int = system(compile_cmd)
+        if rc != 0 is
+            ;; Fall back to interpreter
+            return run_interpreted(file, args, argc)
+        end
+    end
+
+    ;; Run cached binary / bytecode
+    let mut run_cmd: string = "./" + bc_path
+    let mut i: int = 0
+    while i < argc is
+        run_cmd = run_cmd + " " + args[i]
+        i += 1
+    end
+    return system(run_cmd)
+end
+
+fn run_interpreted(file: string, args: [string], argc: int) -> int is
+    ;; Use h# preview (interpreter mode)
+    let hsh: string = find_hsh()
+    let mut cmd: string = hsh + " preview " + file
+    let mut i: int = 0
+    while i < argc is
+        cmd = cmd + " " + args[i]
+        i += 1
+    end
+    return system(cmd)
+end
+
+fn find_hsh() -> string is
+    let bins: [string] = ["h#", "hsharp", "./h#"]
+    for b in bins is
+        if system("command -v " + b + " >/dev/null 2>&1") == 0 is return b end
+    end
+    return "h#"
+end
+
+pub fn jit_clean(cache: JitCache) is
+    if dir_exists(cache.dir) is
+        dir_remove_all(cache.dir)
+        dir_create(cache.dir)
+        write("  \x1b[32m✓\x1b[0m  JIT cache cleared: " + cache.dir)
+    end
+end
