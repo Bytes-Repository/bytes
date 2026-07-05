@@ -1,0 +1,79 @@
+mod config
+mod progress
+mod workspace
+mod installer
+mod isolation
+
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+end
+
+fn find_hsh() -> string is
+    let bins: [string] = ["h#", "hsharp", "/usr/bin/h#"]
+    for b in bins is
+        if system("command -v " + b + " >/dev/null 2>&1") == 0 is return b end
+    end
+    return "h#"
+end
+
+fn capture(cmd: string) -> string is
+    let tmp: string = "/tmp/bytes_build_" + to_string(proc_id()) + ".txt"
+    system(cmd + " >" + tmp + " 2>&1")
+    let out: string = file_read(tmp)
+    file_delete(tmp)
+    return out
+end
+
+pub fn build_single(proj: config::Project, release: bool, verbose: bool) -> int is
+    let hsh:   string = find_hsh()
+    let entry: string = config::build_entry(proj)
+    let out:   string = config::build_output(proj)
+
+    if !dir_exists("build") is dir_create("build") end
+    if !dir_exists("build/cache") is dir_create("build/cache") end
+
+    ;; Install deps
+    if proj.dep_count > 0 is
+        installer::install_all(proj, release, verbose)
+    end
+
+    let emit_arg:  string = if proj.build.emit != "" && proj.build.emit != "bin" then
+                               " --emit " + proj.build.emit else ""
+    let flags:     string = if proj.build.flags != "" then " " + proj.build.flags else "" 
+    let rel_flag:  string = if release then " --release" else "" 
+    let verb_flag: string = if verbose then " --verbose" else "" 
+
+    let cmd: string = hsh + " compile " + entry + " -o " + out + emit_arg + flags + rel_flag + verb_flag
+
+    let t0:  int = time_ms()
+    let rc:  int = system(cmd)
+    let ms:  int = time_ms() - t0
+
+    if rc == 0 is
+        write("  \x1b[32m✓\x1b[0m  " + out + "  \x1b[2m(" + progress::elapsed_str(ms) + ")\x1b[0m")
+    else is
+        let err: string = capture(cmd)
+        ;; Print first few error lines
+        let lines: [string] = string_split(err, "\n")
+        let n:     int      = array_len(lines)
+        let mut i: int = 0
+        while i < n && i < 12 is
+            let l: string = string_trim(lines[i])
+            if l != "" is write("  " + l) end
+            i += 1
+        end
+        write("  \x1b[31merror:\x1b[0m build failed (" + progress::elapsed_str(ms) + ")")
+    end
+
+    return rc
+end
+
+pub fn run_binary(out: string, run_args: [string], run_argc: int) -> int is
+    let mut cmd: string = "./" + out
+    let mut i:   int    = 0
+    while i < run_argc is
+        cmd = cmd + " " + run_args[i]
+        i += 1
+    end
+    return system(cmd)
+end
