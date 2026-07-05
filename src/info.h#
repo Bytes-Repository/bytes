@@ -1,0 +1,65 @@
+mod config
+mod lockfile
+
+pub fn cmd_info_project() -> int is
+    let proj: config::Project = config::load()
+
+    write("")
+    write("  \x1b[1m" + proj.package.name + "\x1b[0m  v" + proj.package.version)
+    if proj.package.description != "" is
+        write("  " + proj.package.description)
+    end
+    write("")
+
+    write("  \x1b[2mPackage\x1b[0m")
+    write("    name    : " + proj.package.name)
+    write("    version : " + proj.package.version)
+    if proj.package.author  != "" is write("    author  : " + proj.package.author)  end
+    if proj.package.license != "" is write("    license : " + proj.package.license) end
+    write("")
+
+    write("  \x1b[2mBuild\x1b[0m")
+    write("    lang    : " + config::build_lang(proj))
+    write("    entry   : " + config::build_entry(proj))
+    write("    output  : " + config::build_output(proj))
+    write("    emit    : " + proj.build.emit)
+    write("    cache   : " + proj.build.cache_dir)
+    if proj.build.flags != "" is write("    flags   : " + proj.build.flags) end
+    write("")
+
+    if proj.has_workspace is
+        write("  \x1b[2mWorkspace\x1b[0m")
+        write("    mode    : " + proj.workspace.mode)
+        write("    members : " + proj.workspace.members)
+        if proj.workspace.build_order != "" is
+            write("    order   : " + proj.workspace.build_order)
+        end
+        write("")
+    end
+
+    if proj.dep_count > 0 is
+        write("  \x1b[2mDependencies (" + to_string(proj.dep_count) + ")\x1b[0m")
+        let mut i: int = 0
+        while i < proj.dep_count is
+            let d: config::DepEntry = proj.deps[i]
+            write("    " + string_pad_right(d.name, 20) + "  [" + d.kind + "]  " + d.source)
+            i += 1
+        end
+        write("")
+    end
+
+    ;; Lockfile
+    let lf: lockfile::LockFile = lockfile::lockfile_read()
+    if lf.pkg_count > 0 is
+        write("  \x1b[2mLocked (" + to_string(lf.pkg_count) + ")\x1b[0m")
+        let mut i: int = 0
+        while i < lf.pkg_count is
+            let p: lockfile::LockedPkg = lf.packages[i]
+            write("    " + string_pad_right(p.name, 20) + "  v" + p.version)
+            i += 1
+        end
+        write("")
+    end
+
+    return 0
+end
