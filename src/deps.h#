@@ -1,0 +1,42 @@
+mod config
+mod lockfile
+mod registry
+
+pub fn show_deps(proj: config::Project) is
+    write("  \x1b[1mDependencies:\x1b[0m " + config::pkg_name(proj) + " v" + config::pkg_version(proj))
+    write("")
+
+    if proj.dep_count == 0 is
+        write("  \x1b[2m(no dependencies)\x1b[0m")
+        write("")
+        return
+    end
+
+    let lf:       lockfile::LockFile = lockfile::lockfile_read()
+    let reg:      registry::Registry = registry::registry_load_cached()
+
+    let mut i: int = 0
+    while i < proj.dep_count is
+        let dep: config::DepEntry = proj.deps[i]
+        let locked:   lockfile::LockedPkg = lockfile::lockfile_get(lf, dep.name)
+        let in_reg:   registry::RegEntry  = registry::registry_find(reg, dep.name)
+
+        let kind_col: string = match dep.kind is
+            "dynamic" => "\x1b[36mdynamic\x1b[0m"
+            "static"  => "\x1b[33mstatic\x1b[0m"
+            "git"     => "\x1b[35mgit\x1b[0m"
+            _         => "\x1b[32mbytes\x1b[0m"
+        end
+
+        let status: string = if locked.name != "" then
+            "\x1b[2m(locked @ " + locked.version + ")\x1b[0m"
+        else if in_reg.name != "" then
+            "\x1b[2m(in registry)\x1b[0m"
+        else
+            "\x1b[2m(local)\x1b[0m"
+
+        write("  " + string_pad_right(dep.name, 22) + " " + kind_col + "  " + status)
+        i += 1
+    end
+    write("")
+end
