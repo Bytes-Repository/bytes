@@ -1,81 +1,86 @@
-#![allow(dead_code)]
-use std::path::{Path, PathBuf};
-use crate::config::PythonConfig;
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+end
 
-pub struct PythonEnv {
-    pub version:  String,
-    pub venv_dir: PathBuf,
-}
+pub struct PyEnv is
+    pub version:  string
+    pub venv_dir: string
+end
 
-impl PythonEnv {
-    pub fn setup(version: &str, cache: &Path) -> anyhow::Result<Self> {
-        let venv_dir = cache.join("venv");
-        if !venv_dir.exists() {
-            let python = find_python(version)?;
-            let ok = std::process::Command::new(&python)
-            .args(["-m", "venv", &venv_dir.display().to_string()])
-            .status().map(|s| s.success()).unwrap_or(false);
-            if !ok {
-                anyhow::bail!("failed to create venv at {}", venv_dir.display());
-            }
-        }
-        Ok(Self { version: version.to_string(), venv_dir })
-    }
+fn find_python(version: string) -> string is
+    let candidates: [string] = [
+        "python" + version,
+        "python" + string_slice(version, 0, 1),
+        "python3",
+        "python",
+    ]
+    for py in candidates is
+        if system("command -v " + py + " >/dev/null 2>&1") == 0 is
+            return py
+        end
+    end
+    ;; Fallback absolutes
+    for p in ["/usr/bin/python3", "/usr/local/bin/python3"] is
+        if file_exists(p) is return p end
+    end
+    return "python3"
+end
 
-    pub fn install_package(&self, pkg: &str, ver: Option<&str>) -> anyhow::Result<()> {
-        let pip  = self.venv_dir.join("bin/pip");
-        let spec = if let Some(v) = ver {
-            if v == "latest" { pkg.to_string() } else { format!("{}=={}", pkg, v) }
-        } else { pkg.to_string() };
+pub fn pyenv_setup(version: string, cache_dir: string) -> PyEnv is
+    let venv_dir: string = cache_dir + "/venv"
+    if !dir_exists(venv_dir) is
+        let python: string = find_python(version)
+        let rc: int = system(python + " -m venv " + venv_dir + " 2>/dev/null")
+        if rc != 0 is
+            write("  \x1b[33mwarn:\x1b[0m failed to create venv at " + venv_dir)
+        end
+    end
+    return PyEnv { version: version, venv_dir: venv_dir }
+end
 
-        let ok = std::process::Command::new(&pip)
-        .args(["install", "-q", &spec])
-        .status().map(|s| s.success()).unwrap_or(false);
+pub fn pyenv_install(env: PyEnv, pkg: string, ver: string) -> bool is
+    let pip:  string = env.venv_dir + "/bin/pip"
+    let spec: string = if ver != "" && ver != "latest" then pkg + "==" + ver else pkg 
 
-        if !ok {
-            let _ = std::process::Command::new("pip3")
-            .args(["install", "-q", "--user", &spec])
-            .status();
-        }
-        Ok(())
-    }
-}
+    let pip_to_use: string = if file_exists(pip) then pip else "pip3" 
+    let rc: int = system(pip_to_use + " install -q '" + spec + "' 2>/dev/null")
+    if rc != 0 is
+        ;; Try user-level fallback
+        let rc2: int = system("pip3 install -q --user '" + spec + "' 2>/dev/null")
+        return rc2 == 0
+    end
+    return true
+end
 
-pub fn setup_python_deps(config: &PythonConfig, cache: &Path) -> anyhow::Result<()> {
-    if config.packages.is_empty() { return Ok(()); }
-    let env = PythonEnv::setup(&config.version, cache)?;
-    for pkg in &config.packages { env.install_package(pkg, None)?; }
-    Ok(())
-}
+pub fn setup_python_deps(pkgs: [string], pkg_count: int, version: string, cache_dir: string) -> bool is
+    if pkg_count == 0 is return true end
 
-pub fn resolve_python_import(pkg: &str, venv_dir: &Path) -> Option<PathBuf> {
-    let site_packages = venv_dir.join("lib");
-    if let Ok(entries) = std::fs::read_dir(&site_packages) {
-        for e in entries.flatten() {
-            let sp = e.path().join("site-packages").join(pkg);
-            if sp.exists() { return Some(sp); }
-        }
-    }
-    None
-}
+    if !dir_exists(cache_dir) is dir_create(cache_dir) end
+    let env: PyEnv = pyenv_setup(version, cache_dir)
 
-fn find_python(version: &str) -> anyhow::Result<String> {
-    let candidates = vec![
-        format!("python{}", version),
-            format!("python{}", &version[..1]),
-                "python3".to_string(),
-                "python".to_string(),
-    ];
-    for py in &candidates {
-        if let Ok(o) = std::process::Command::new("which").arg(py).output() {
-            if o.status.success() {
-                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !s.is_empty() { return Ok(s); }
-            }
-        }
-    }
-    for p in &["/usr/bin/python3", "/usr/local/bin/python3"] {
-        if std::path::Path::new(p).exists() { return Ok(p.to_string()); }
-    }
-    Err(anyhow::anyhow!("Python {} not found", version))
-}
+    write("  \x1b[2mInstalling " + to_string(pkg_count) + " Python package(s)...\x1b[0m")
+
+    let mut failed: int = 0
+    let mut i: int = 0
+    while i < pkg_count is
+        let pkg: string = pkgs[i]
+        if !pyenv_install(env, pkg, "") is
+            write("  \x1b[33mwarn:\x1b[0m failed to install Python package: " + pkg)
+            failed += 1
+        else is
+            write("  \x1b[32m✓\x1b[0m  " + pkg)
+        end
+        i += 1
+    end
+
+    return failed == 0
+end
+
+pub fn resolve_python_import(pkg: string, venv_dir: string) -> string is
+    ;; Check venv site-packages
+    let tmp: string = "/tmp/bytes_py_find_" + to_string(proc_id()) + ".txt"
+    system("find " + venv_dir + "/lib -name '" + pkg + "' -maxdepth 4 2>/dev/null | head -1 > " + tmp)
+    let result: string = string_trim(file_read(tmp))
+    file_delete(tmp)
+    return result
+end
