@@ -1,1 +1,324 @@
+pub struct PackageConfig is
+    pub name:        string
+    pub version:     string
+    pub description: string
+    pub entry:       string
+    pub author:      string
+    pub license:     string
+end
 
+pub struct BuildConfig is
+    pub lang:        string
+    pub entry:       string
+    pub output:      string
+    pub emit:        string
+    pub flags:       string
+    pub parallel:    bool
+    pub cache_dir:   string
+    pub build_order: string
+end
+
+pub struct DepEntry is
+    pub name:   string
+    pub kind:   string
+    pub source: string
+end
+
+pub struct WorkspaceConfig is
+    pub name:        string
+    pub version:     string
+    pub mode:        string
+    pub members:     string
+    pub languages:   string
+    pub build_order: string
+end
+
+pub struct Project is
+    pub package:       PackageConfig
+    pub build:         BuildConfig
+    pub workspace:     WorkspaceConfig
+    pub deps:          [DepEntry]
+    pub dep_count:     int
+    pub has_workspace: bool
+    pub root_path:     string
+end
+
+pub fn default_project() -> Project is
+    return Project {
+        package: PackageConfig {
+            name: "unnamed", version: "0.1.0", description: "",
+            entry: "src/main.h#", author: "", license: "MIT"
+        },
+        build: BuildConfig {
+            lang: "h#", entry: "src/main.h#", output: "build/main",
+            emit: "bin", flags: "", parallel: false,
+            cache_dir: "build/cache", build_order: ""
+        },
+        workspace: WorkspaceConfig {
+            name: "", version: "", mode: "standard",
+            members: "", languages: "", build_order: ""
+        },
+        deps: [], dep_count: 0,
+        has_workspace: false, root_path: ".",
+    }
+end
+
+;; ── Parser .hk ───────────────────────────────────────────────────────────────
+
+fn hk_trim(s: string) -> string is return string_trim(s) end
+
+pub fn hk_parse_value(line: string) -> string is
+    let idx: int = string_find(line, "=>")
+    if idx < 0 is return "" end
+    let v: string = hk_trim(string_slice(line, idx + 2, string_len(line)))
+    let v: string = string_replace(v, "\"", "")
+    ;; Strip inline comment: "  !" or "  ;;"
+    let bang:  int = string_find(v, "  !")
+    let semi:  int = string_find(v, "  ;;")
+    let cut:   int = if bang >= 0 && (semi < 0 || bang < semi) then bang
+                     else if semi >= 0 then semi else -1  
+    return if cut >= 0 then hk_trim(string_slice(v, 0, cut)) else v 
+end
+
+pub fn hk_parse_key(line: string) -> string is
+    let t: string = hk_trim(line)
+    let mut i: int = 0
+    while i < string_len(t) && string_at(t, i) == "-" is i += 1 end
+    if i < string_len(t) && string_at(t, i) == ">" is i += 1 end
+    let t: string = hk_trim(string_slice(t, i, string_len(t)))
+    let arrow: int = string_find(t, "=>")
+    if arrow < 0 is return hk_trim(t) end
+    return hk_trim(string_slice(t, 0, arrow))
+end
+
+pub fn parse(content: string) -> Project is
+    let mut proj: Project   = default_project()
+    let mut section:    string = ""
+    let mut sub:        string = ""
+
+    let lines:  [string] = string_split(content, "\n")
+    let nlines: int = array_len(lines)
+    let mut i: int = 0
+
+    while i < nlines is
+        let line: string = hk_trim(lines[i])
+        i += 1
+
+        if line == "" || string_starts_with(line, "!") ||
+           string_starts_with(line, ";;") || string_starts_with(line, "#") is
+            continue
+        end
+
+        if string_starts_with(line, "[") && string_ends_with(line, "]") is
+            section = string_slice(line, 1, string_len(line) - 1)
+            sub = ""
+            continue
+        end
+
+        if !string_starts_with(line, "->") is continue end
+
+        let key: string = hk_parse_key(line)
+        let val: string = hk_parse_value(line)
+
+        ;; Key with no value = subsection marker
+        if val == "" && !string_contains(line, "=>") is
+            sub = key
+            continue
+        end
+
+        match section is
+            "package" => is
+                match key is
+                    "name"        => is proj.package.name        = val end
+                    "version"     => is proj.package.version     = val end
+                    "description" => is proj.package.description = val end
+                    "entry"       => is proj.package.entry       = val end
+                    "author"      => is proj.package.author      = val end
+                    "license"     => is proj.package.license     = val end
+                    _ => is end
+                end
+            end
+            "build" => is
+                match key is
+                    "lang"        => is proj.build.lang        = val end
+                    "entry"       => is proj.build.entry       = val end
+                    "output"      => is proj.build.output      = val end
+                    "emit"        => is proj.build.emit        = val end
+                    "flags"       => is proj.build.flags       = val end
+                    "parallel"    => is proj.build.parallel    = val == "true" end
+                    "cache"       => is proj.build.cache_dir   = val end
+                    "build-order" => is proj.build.build_order = val end
+                    _ => is end
+                end
+            end
+            "workspace" => is
+                proj.has_workspace = true
+                if sub == "languages" is
+                    let member: string = hk_trim(string_replace(key, "-", ""))
+                    proj.workspace.languages = proj.workspace.languages + member + "=" + val + ","
+                else is
+                    match key is
+                        "name"        => is proj.workspace.name        = val end
+                        "version"     => is proj.workspace.version     = val end
+                        "mode"        => is proj.workspace.mode        = val end
+                        "members"     => is proj.workspace.members     = val end
+                        "build-order" => is proj.workspace.build_order = val end
+                        _ => is end
+                    end
+                end
+            end
+            "deps" => is
+                let kind: string = if val == "dynamic" || val == "static" then val
+                                   else if string_starts_with(val, "git") then "git"
+                                   else if string_starts_with(val, "http") then "git"
+                                   else "bytes"
+                proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: kind, source: val })
+                proj.dep_count += 1
+            end
+            _ => is end
+        end
+    end
+
+    if proj.package.name == "" is proj.package.name = "unnamed" end
+    return proj
+end
+
+;; ── File finders ─────────────────────────────────────────────────────────────
+
+pub fn find_hk() -> string is
+    let candidates: [string] = ["bytes.hk", "Bytes.hk", "bytes.toml", "Bytes.toml"]
+    for c in candidates is
+        if file_exists(c) is return c end
+    end
+    return ""
+end
+
+pub fn find_hk_upward() -> string is
+    ;; Search current dir and up to 5 parents
+    let direct: string = find_hk()
+    if direct != "" is return direct end
+    let mut dir: string = ".."
+    let mut depth: int = 0
+    while depth < 5 is
+        for name in ["bytes.hk", "Bytes.hk"] is
+            let p: string = dir + "/" + name
+            if file_exists(p) is return p end
+        end
+        dir   = dir + "/.."
+        depth += 1
+    end
+    return ""
+end
+
+pub fn load() -> Project is
+    let path: string = find_hk()
+    if path == "" is
+        write("  \x1b[31merror:\x1b[0m bytes.hk nicht gefunden")
+        write("  Führe 'bytes new <name>' aus")
+        exit(1)
+    end
+    let mut proj: Project = parse(file_read(path))
+    proj.root_path = "."
+    return proj
+end
+
+pub fn load_path(path: string) -> Project is
+    let mut proj: Project = parse(file_read(path))
+    let slash: int = string_rfind(path, "/")
+    proj.root_path = if slash >= 0 then string_slice(path, 0, slash) else "." 
+    return proj
+end
+
+;; ── Accessors ────────────────────────────────────────────────────────────────
+
+pub fn pkg_name(proj: Project) -> string is return proj.package.name end
+pub fn pkg_version(proj: Project) -> string is return proj.package.version end
+
+pub fn build_entry(proj: Project) -> string is
+    if proj.build.entry != "" is return proj.build.entry end
+    if proj.package.entry != "" is return proj.package.entry end
+    return "src/main.h#"
+end
+
+pub fn build_output(proj: Project) -> string is
+    if proj.build.output != "" is return proj.build.output end
+    return "build/" + proj.package.name
+end
+
+pub fn build_lang(proj: Project) -> string is
+    if proj.build.lang != "" is return proj.build.lang end
+    return "h#"
+end
+
+pub fn ws_members(proj: Project) -> [string] is
+    let raw: string = string_replace(string_replace(
+        string_replace(proj.workspace.members, "[", ""), "]", ""), "\"", "")
+    let parts: [string] = string_split(raw, ",")
+    let n: int = array_len(parts)
+    let mut result: [string] = []
+    let mut i: int = 0
+    while i < n is
+        let m: string = string_trim(parts[i])
+        if m != "" is result = array_push(result, m) end
+        i += 1
+    end
+    return result
+end
+
+pub fn ws_member_lang(proj: Project, member: string) -> string is
+    let pairs: [string] = string_split(proj.workspace.languages, ",")
+    let n: int = array_len(pairs)
+    let mut i: int = 0
+    while i < n is
+        let pair: string = string_trim(pairs[i])
+        let eq: int = string_find(pair, "=")
+        if eq > 0 is
+            let m: string = string_trim(string_slice(pair, 0, eq))
+            let l: string = string_trim(string_slice(pair, eq + 1, string_len(pair)))
+            if m == member is return l end
+        end
+        i += 1
+    end
+    return "h#"
+end
+
+;; ── Templates ────────────────────────────────────────────────────────────────
+
+pub fn tpl_package(name: string) -> string is
+    return "[package]\n-> name        => " + name + "\n" +
+           "-> version     => 0.1.0\n-> description => " + name + "\n" +
+           "-> author      =>\n-> license     => MIT\n\n" +
+           "[build]\n-> lang   => h#\n-> entry  => src/main.h#\n" +
+           "-> output => build/" + name + "\n\n[deps]\n"
+end
+
+pub fn tpl_workspace(name: string) -> string is
+    return "! " + name + " workspace\n\n[workspace]\n" +
+           "-> name    => " + name + "\n-> version => 0.1.0\n" +
+           "-> mode    => standard\n-> members => [\"" + name + "-core\"]\n\n" +
+           "[build]\n-> parallel => true\n-> cache    => build/cache/\n"
+end
+
+pub fn tpl_lib_hk(name: string) -> string is
+    return "[package]\n-> name    => " + name + "\n-> version => 0.1.0\n\n" +
+           "[build]\n-> lang   => h#\n-> entry  => src/lib.h#\n" +
+           "-> output => build/lib" + name + "\n-> emit   => lib\n"
+end
+
+pub fn tpl_main(name: string) -> string is
+    return ";; " + name + " — main entry point\n\nfn main() is\n" +
+           "    write(\"Hello from " + name + "!\")\nend\n"
+end
+
+pub fn tpl_lib_source(name: string) -> string is
+    return ";; " + name + " — library\n\npub fn hello() -> string is\n" +
+           "    return \"Hello from " + name + "!\"\nend\n"
+end
+
+pub fn tpl_gitignore() -> string is
+    return "build/\nbuild/cache/\n*.jit\n*.h#bc\n"
+end
+
+pub fn tpl_hk_gitignore() -> string is
+    return "build/\nbuild/cache/\n*.jit\n*.h#bc\n"
+end
