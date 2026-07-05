@@ -1,195 +1,139 @@
-use colored::*;
-use std::io::Write;
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+end
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum BarTheme {
-    Default,
-    Arrow,
-    Cargo,
-}
+;; ── Spinner ───────────────────────────────────────────────────────────────────
 
-impl Default for BarTheme {
-    fn default() -> Self { Self::Default }
-}
+pub struct Spinner is
+    pub frames:  [string]
+    pub current: int
+    pub msg:     string
+end
 
-impl std::fmt::Display for BarTheme {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            Self::Default => write!(f, "default"),
-            Self::Arrow   => write!(f, "arrow"),
-            Self::Cargo   => write!(f, "cargo"),
-        }
+pub fn spinner_new(msg: string) -> Spinner is
+    return Spinner {
+        frames:  ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+        current: 0,
+        msg:     msg,
     }
-}
+end
 
-impl std::str::FromStr for BarTheme {
-    type Err = ();
-    fn from_str(s: &str) -> Result<Self, ()> {
-        match s {
-            "arrow" => Ok(Self::Arrow),
-            "cargo" => Ok(Self::Cargo),
-            _       => Ok(Self::Default),
-        }
+pub fn spinner_tick(s: Spinner) -> Spinner is
+    let frame: string = s.frames[s.current % 10]
+    io_print("\r  " + "\x1b[36m" + frame + "\x1b[0m " + s.msg + "  ")
+    return Spinner {
+        frames:  s.frames,
+        current: s.current + 1,
+        msg:     s.msg,
     }
-}
+end
 
-pub struct BytesBar {
-    pub total:   u64,
-    pub current: u64,
-    pub width:   usize,
-    pub theme:   BarTheme,
-    pub status:  String,
-}
+pub fn spinner_finish(s: Spinner, done_msg: string) is
+    io_print("\r  \x1b[32m✓\x1b[0m " + done_msg + "                    \n")
+end
 
-impl BytesBar {
-    pub fn new(total: u64, theme: BarTheme) -> Self {
-        Self { total, current: 0, width: 20, theme, status: String::new() }
+pub fn spinner_fail(s: Spinner, err_msg: string) is
+    io_print("\r  \x1b[31m✗\x1b[0m " + err_msg + "                    \n")
+end
+
+;; ── Progress bar ─────────────────────────────────────────────────────────────
+
+pub struct ProgressBar is
+    pub total:   int
+    pub current: int
+    pub width:   int
+    pub theme:   string    ;; "default" | "arrow" | "cargo"
+    pub label:   string
+end
+
+pub fn bar_new(total: int, theme: string, label: string) -> ProgressBar is
+    return ProgressBar { total: total, current: 0, width: 40, theme: theme, label: label }
+end
+
+pub fn bar_inc(b: ProgressBar, n: int) -> ProgressBar is
+    let new_cur: int = if b.current + n > b.total then b.total else b.current + n 
+    let pct: int     = if b.total > 0 then (new_cur * 100) / b.total else 0 
+    let filled: int  = if b.total > 0 then (new_cur * b.width) / b.total else 0 
+
+    let mut bar_str: string = "["
+    let mut j: int = 0
+    while j < b.width is
+        if j < filled is
+            bar_str = bar_str + if b.theme == "arrow" then "=" else "█" 
+        else if j == filled is
+            bar_str = bar_str + if b.theme == "arrow" then ">" else "░" 
+        else is
+            bar_str = bar_str + if b.theme == "arrow" then "-" else "░" 
+        end
+        j += 1
+    end
+    bar_str = bar_str + "]"
+
+    io_print("\r  \x1b[36m" + b.label + "\x1b[0m " + bar_str + " " +
+             to_string(pct) + "%  ")
+
+    return ProgressBar {
+        total: b.total, current: new_cur,
+        width: b.width, theme: b.theme, label: b.label
     }
+end
 
-    pub fn set_status(&mut self, s: impl Into<String>) {
-        self.status = s.into();
-    }
+pub fn bar_finish(b: ProgressBar, msg: string) is
+    let full_bar: string = "[" + string_repeat("█", b.width) + "]"
+    io_print("\r  \x1b[32m✓\x1b[0m \x1b[36m" + b.label + "\x1b[0m " + full_bar + " 100% " + msg + "\n")
+end
 
-    pub fn inc(&mut self, n: u64) {
-        self.current = (self.current + n).min(self.total);
-        self.render();
-    }
+;; ── Timing ───────────────────────────────────────────────────────────────────
 
-    pub fn finish(&mut self, msg: &str) {
-        self.current = self.total;
-        self.render();
-        println!();
-        println!("  {} {}", "✓".green().bold(), msg.bold());
-    }
+pub fn elapsed_str(ms: int) -> string is
+    if ms < 1000 is return to_string(ms) + "ms" end
+    let secs:  int = ms / 1000
+    let cents: int = (ms % 1000) / 100
+    return to_string(secs) + "." + to_string(cents) + "s"
+end
 
-    fn render(&self) {
-        let pct    = if self.total == 0 { 100.0 } else { self.current as f64 / self.total as f64 * 100.0 };
-        let filled = ((pct / 100.0) * self.width as f64) as usize;
-        let empty  = self.width.saturating_sub(filled);
+;; ── Build summary printer ────────────────────────────────────────────────────
 
-        let bar = match &self.theme {
-            BarTheme::Default => {
-                format!(
-                    "{}{}{}{}",
-                    "[".cyan(),
-                        "#".repeat(filled).cyan().bold(),
-                        "-".repeat(empty).dimmed(),
-                        "]".cyan()
-                )
-            }
-            BarTheme::Arrow => {
-                if filled == 0 {
-                    format!("{}{}{}", "[".cyan(), "-".repeat(self.width).dimmed(), "]".cyan())
-                } else {
-                    let fill_part = if filled > 1 { "#".repeat(filled - 1) } else { String::new() };
-                    format!(
-                        "{}{}{}{}{}",
-                        "[".cyan(),
-                            fill_part.cyan().bold(),
-                            ">".cyan().bold(),
-                            "-".repeat(empty).dimmed(),
-                            "]".cyan()
-                    )
-                }
-            }
-            BarTheme::Cargo => {
-                if filled == 0 {
-                    format!("{}{}{}", "[".cyan(), " ".repeat(self.width), "]".cyan())
-                } else {
-                    let eq_part: String = "=".repeat(filled.saturating_sub(1));
-                    format!(
-                        "{}{}{}{}{}",
-                        "[".cyan(),
-                            eq_part.cyan().bold(),
-                            ">".cyan().bold(),
-                            " ".repeat(empty),
-                            "]".cyan()
-                    )
-                }
-            }
-        };
+pub struct MemberStatus is
+    pub name:    string
+    pub lang:    string
+    pub success: bool
+    pub output:  string
+    pub elapsed: int
+end
 
-        let pct_str = format!("{:.0}%", pct);
-        let eta_str = if pct > 0.0 && pct < 100.0 {
-            let remaining = self.total.saturating_sub(self.current);
-            let rate      = self.current.max(1);
-            format!(" ~{}s", remaining / rate)
-        } else {
-            String::new()
-        };
+pub fn print_member(m: MemberStatus) is
+    let icon:    string = if m.success then "\x1b[32m✓\x1b[0m" else "\x1b[31mx\x1b[0m" 
+    let time_s:  string = elapsed_str(m.elapsed)
+    write("  " + icon + " " + string_pad_right(m.name, 20) + " \x1b[2m" + m.lang + " (" + time_s + ")\x1b[0m")
+    if !m.success is
+        let lines:  [string] = string_split(m.output, "\n")
+        let n: int = array_len(lines)
+        let mut i: int = 0
+        while i < n && i < 5 is
+            let l: string = string_trim(lines[i])
+            if l != "" is write("      \x1b[31m" + l + "\x1b[0m") end
+            i += 1
+        end
+    end
+end
 
-        let status = if self.status.len() > 36 { &self.status[..36] } else { &self.status };
+pub fn print_build_header(name: string, version: string, release: bool) is
+    write("")
+    write("  \x1b[1mbytes\x1b[0m  \x1b[2mCompiling\x1b[0m \x1b[1m" + name + "\x1b[0m v" + version +
+          if release then " \x1b[33m(release)\x1b[0m" else "" )
+    write("")
+end
 
-        print!(
-            "\r{} {} {}{}  {}",
-            bar,
-            pct_str.yellow().bold(),
-               eta_str.dimmed(),
-               " ".repeat(10),
-               status.cyan()
-        );
-        std::io::stdout().flush().ok();
-    }
-}
-
-/// Multi-item queue display below progress bar
-pub fn print_queue(items: &[String], current_idx: usize) {
-    let shown: Vec<_> = items.iter().skip(current_idx).take(5).collect();
-    if shown.is_empty() { return; }
-    println!();
-    for (i, item) in shown.iter().enumerate() {
-        let prefix = if i == 0 {
-            "  →".cyan().bold().to_string()
-        } else {
-            "  ·".dimmed().to_string()
-        };
-        println!("{} {}", prefix, item.dimmed());
-    }
-    print!("\x1b[{}A", shown.len() + 1);
-    std::io::stdout().flush().ok();
-}
-
-/// TUI settings for bytes
-pub fn bytes_settings_tui(theme: &mut BarTheme) -> anyhow::Result<()> {
-    use std::io::BufRead;
-
-    loop {
-        print!("\x1b[2J\x1b[H");
-        std::io::stdout().flush().ok();
-
-        println!("{}", "╔═══════════════════════════════════╗".cyan());
-        println!("{}", "║         BYTES  SETTINGS           ║".cyan());
-        println!("{}", "╚═══════════════════════════════════╝".cyan());
-        println!();
-        println!("  {} Progress bar theme: {}", "[1]".cyan().bold(), theme.to_string().yellow());
-        println!("  {}   default  [#------] [%]", " ".dimmed());
-        println!("  {}   arrow    [#>-----] [%]", " ".dimmed());
-        println!("  {}   cargo    [===>   ] [%]", " ".dimmed());
-        println!();
-        println!("  {} Save & exit", "[s]".green().bold());
-        println!("  {} Exit without saving", "[q]".red().bold());
-        println!();
-        print!("  → ");
-        std::io::stdout().flush().ok();
-
-        let stdin = std::io::stdin();
-        let mut line = String::new();
-        stdin.lock().read_line(&mut line).ok();
-
-        match line.trim() {
-            "1" => {
-                print!("\n  Theme (default/arrow/cargo): ");
-                std::io::stdout().flush().ok();
-                let mut t = String::new();
-                std::io::stdin().lock().read_line(&mut t).ok();
-                *theme = t.trim().parse().unwrap_or(BarTheme::Default);
-                println!("  {} set to: {}", "✓".green(), theme);
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            "s" | "S" => { println!("\n  {} saved", "✓".green().bold()); break; }
-            "q" | "Q" => { println!("\n  {} cancelled", "·".dimmed()); break; }
-            _ => {}
-        }
-    }
-    Ok(())
-}
+pub fn print_build_summary(passed: int, failed: int, elapsed_ms: int) is
+    write("")
+    write("  \x1b[2m──────────────────────────────────────────────────\x1b[0m")
+    if failed == 0 is
+        write("  \x1b[32m✓\x1b[0m  " + to_string(passed) + "/" + to_string(passed + failed) +
+              " succeeded  \x1b[2m(" + elapsed_str(elapsed_ms) + ")\x1b[0m")
+    else is
+        write("  \x1b[31mx\x1b[0m  " + to_string(passed) + "/" + to_string(passed + failed) +
+              " succeeded, " + to_string(failed) + " failed  \x1b[2m(" + elapsed_str(elapsed_ms) + ")\x1b[0m")
+    end
+    write("")
+end
