@@ -1,0 +1,78 @@
+mod config
+
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+end
+
+pub fn cmd_new_scaffold(
+    name:      string,
+    is_lib:    bool,
+    is_ws:     bool,
+    is_ws_sp:  bool,    ;; workspace-special (multi-lang)
+) -> int is
+    if name == "" is
+        write("  \x1b[31merror:\x1b[0m Usage: bytes new <name>")
+        return 1
+    end
+    if dir_exists(name) is
+        write("  \x1b[31merror:\x1b[0m directory '" + name + "' already exists")
+        return 1
+    end
+
+    ;; Base dirs
+    dir_create(name)
+    dir_create(name + "/src")
+    dir_create(name + "/build")
+    dir_create(name + "/build/cache")
+    dir_create(name + "/tests")
+
+    if is_ws || is_ws_sp is
+        ;; Workspace
+        let mode: string = if is_ws_sp then "special" else "standard" 
+        write_ws_hk(name, mode)
+        ;; Create first member
+        let member: string = name + "-core"
+        dir_create(name + "/" + member)
+        dir_create(name + "/" + member + "/src")
+        dir_create(name + "/" + member + "/build")
+        file_write(name + "/" + member + "/bytes.hk",
+            "[package]\n-> name    => " + member + "\n-> version => 0.1.0\n\n" +
+            "[build]\n-> lang   => h#\n-> entry  => src/main.h#\n" +
+            "-> output => build/" + member + "\n")
+        file_write(name + "/" + member + "/src/main.h#", config::tpl_main(member))
+        write("  \x1b[32mCreated:\x1b[0m \x1b[1m" + name + "\x1b[0m (workspace/" + mode + ")")
+        write("  \x1b[2mMember:\x1b[0m  " + member + "/")
+    else if is_lib is
+        ;; Library
+        file_write(name + "/bytes.hk", config::tpl_lib_hk(name))
+        file_write(name + "/src/lib.h#", config::tpl_lib_source(name))
+        write("  \x1b[32mCreated:\x1b[0m \x1b[1m" + name + "\x1b[0m (library)")
+        write("  \x1b[2mEntry:\x1b[0m   src/lib.h#")
+    else is
+        ;; Binary
+        file_write(name + "/bytes.hk", config::tpl_package(name))
+        file_write(name + "/src/main.h#", config::tpl_main(name))
+        write("  \x1b[32mCreated:\x1b[0m \x1b[1m" + name + "\x1b[0m (binary)")
+        write("  \x1b[2mEntry:\x1b[0m   src/main.h#")
+    end
+
+    file_write(name + "/.gitignore", config::tpl_gitignore())
+    write("  \x1b[2mConfig:\x1b[0m  bytes.hk")
+    write("")
+    write("  \x1b[1mNext:\x1b[0m")
+    write("    cd " + name)
+    write("    bytes build")
+    write("")
+    return 0
+end
+
+fn write_ws_hk(name: string, mode: string) is
+    let content: string = "! " + name + " workspace\n\n[workspace]\n" +
+        "-> name    => " + name + "\n" +
+        "-> version => 0.1.0\n" +
+        "-> mode    => " + mode + "\n" +
+        "-> members => [\"" + name + "-core\"]\n" +
+        if mode == "special" then "-> languages\n--> " + name + "-core => h#\n" else ""  +
+        "\n[build]\n-> parallel    => false\n-> cache       => build/cache/\n"
+    file_write(name + "/bytes.hk", content)
+end
