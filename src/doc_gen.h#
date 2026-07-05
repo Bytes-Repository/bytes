@@ -1,1 +1,319 @@
+extern dynamic [c] is
+    fn system(cmd: string) -> int
+end
 
+pub struct DocItem is
+    pub kind:      string    ;; "fn" | "struct" | "enum" | "trait"
+    pub name:      string
+    pub signature: string
+    pub doc:       string
+    pub module:    string
+    pub file:      string
+    pub line:      int
+end
+
+fn escape_html(s: string) -> string is
+    let s: string = string_replace(s, "&", "&amp;")
+    let s: string = string_replace(s, "<", "&lt;")
+    let s: string = string_replace(s, ">", "&gt;")
+    return string_replace(s, "\"", "&quot;")
+end
+
+fn sanitise_filename(s: string) -> string is
+    ;; Replace non-alphanumeric/underscore/dash with underscore
+    let chars: [string] = string_chars(s)
+    let n:     int = array_len(chars)
+    let mut result: string = ""
+    let mut i: int = 0
+    while i < n is
+        let c: string = chars[i]
+        if (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") ||
+           (c >= "0" && c <= "9") || c == "_" || c == "-" is
+            result = result + c
+        else is
+            result = result + "_"
+        end
+        i += 1
+    end
+    return result
+end
+
+fn collect_hsharp_files() -> [string] is
+    let tmp: string = "/tmp/bytes_doc_files_" + to_string(proc_id()) + ".txt"
+    let dirs: [string] = ["src", "std", "."]
+    let mut found: [string] = []
+    for d in dirs is
+        if dir_exists(d) is
+            system("find " + d + " -name '*.h#' ! -path './build/*' -maxdepth 5 2>/dev/null | sort >> " + tmp)
+        end
+    end
+    let content: string = file_read(tmp)
+    file_delete(tmp)
+    if content == "" is return [] end
+    let lines: [string] = string_split(content, "\n")
+    let n:     int = array_len(lines)
+    let mut result: [string] = []
+    let mut i: int = 0
+    while i < n is
+        let l: string = string_trim(lines[i])
+        if l != "" is result = array_push(result, l) end
+        i += 1
+    end
+    return result
+end
+
+fn file_stem(path: string) -> string is
+    ;; basename without extension
+    let slash: int = string_rfind(path, "/")
+    let base: string = if slash >= 0 then string_slice(path, slash + 1, string_len(path)) else path 
+    let dot: int = string_rfind(base, ".")
+    if dot >= 0 is return string_slice(base, 0, dot) end
+    return base
+end
+
+fn extract_doc_items(src: string, file: string) -> [DocItem] is
+    let module:  string   = file_stem(file)
+    let lines:   [string] = string_split(src, "\n")
+    let n:       int      = array_len(lines)
+    let mut items:   [DocItem] = []
+    let mut doc_buf: string = ""
+    let mut i: int = 0
+
+    while i < n is
+        let line: string = string_trim(lines[i])
+
+        if string_starts_with(line, "///") is
+            doc_buf = ""
+            ;; Collect all consecutive /// lines
+            while i < n && string_starts_with(string_trim(lines[i]), "///") is
+                let doc_line: string = string_trim(string_slice(string_trim(lines[i]), 3, string_len(string_trim(lines[i]))))
+                if doc_buf != "" is doc_buf = doc_buf + "\n" end
+                doc_buf = doc_buf + doc_line
+                i += 1
+            end
+            ;; Skip blank lines
+            while i < n && string_trim(lines[i]) == "" is i += 1 end
+            ;; Next line is the item
+            if i < n is
+                let item_line: string = string_trim(lines[i])
+                let item: DocItem = parse_item_sig(item_line, doc_buf, module, file, i + 1)
+                if item.kind != "" is
+                    items = array_push(items, item)
+                end
+            end
+        else is
+            i += 1
+        end
+    end
+    return items
+end
+
+fn parse_item_sig(line: string, doc: string, module: string, file: string, ln: int) -> DocItem is
+    let empty: DocItem = DocItem { kind: "", name: "", signature: "", doc: "", module: module, file: file, line: ln }
+
+    ;; Strip pub prefix
+    let l: string = if string_starts_with(line, "pub ") then string_slice(line, 4, string_len(line)) else line 
+
+    if string_starts_with(l, "fn ") is
+        let rest:  string = string_slice(l, 3, string_len(l))
+        let paren: int    = string_find(rest, "(")
+        let name:  string = if paren >= 0 then string_trim(string_slice(rest, 0, paren)) else rest 
+        return DocItem { kind: "fn", name: name, signature: line, doc: doc, module: module, file: file, line: ln }
+    end
+
+    if string_starts_with(l, "struct ") is
+        let rest: string = string_slice(l, 7, string_len(l))
+        let sp:   int    = string_find(rest, " ")
+        let name: string = if sp >= 0 then string_slice(rest, 0, sp) else rest 
+        return DocItem { kind: "struct", name: name, signature: line, doc: doc, module: module, file: file, line: ln }
+    end
+
+    if string_starts_with(l, "enum ") is
+        let rest: string = string_slice(l, 5, string_len(l))
+        let sp:   int    = string_find(rest, " ")
+        let name: string = if sp >= 0 then string_slice(rest, 0, sp) else rest 
+        return DocItem { kind: "enum", name: name, signature: line, doc: doc, module: module, file: file, line: ln }
+    end
+
+    if string_starts_with(l, "trait ") is
+        let rest: string = string_slice(l, 6, string_len(l))
+        let sp:   int    = string_find(rest, " ")
+        let name: string = if sp >= 0 then string_slice(rest, 0, sp) else rest 
+        return DocItem { kind: "trait", name: name, signature: line, doc: doc, module: module, file: file, line: ln }
+    end
+
+    return empty
+end
+
+fn render_index_html(items: [DocItem], item_count: int) -> string is
+    let mut html: string = "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"UTF-8\">" +
+        "<title>H# Documentation</title>\n<style>\n" +
+        "body{font-family:'Segoe UI',sans-serif;background:#0d1117;color:#e6edf3;margin:0}\n" +
+        ".header{background:#161b22;padding:24px 40px;border-bottom:1px solid #30363d}\n" +
+        ".header h1{margin:0;color:#58a6ff;font-size:1.8rem}\n" +
+        ".content{padding:32px 40px;max-width:1100px;margin:0 auto}\n" +
+        ".item{background:#161b22;border:1px solid #30363d;border-radius:8px;margin:16px 0;padding:20px}\n" +
+        ".kind{font-size:.75rem;color:#79c0ff;text-transform:uppercase;letter-spacing:1px}\n" +
+        ".name{font-size:1.2rem;font-weight:bold;color:#f0f6fc;margin:4px 0}\n" +
+        ".sig{font-family:monospace;color:#d2a8ff;font-size:.9rem;background:#0d1117;padding:8px 12px;border-radius:4px;margin:8px 0}\n" +
+        ".doc{color:#c9d1d9;line-height:1.6;white-space:pre-wrap}\n" +
+        "a{color:#58a6ff} a:hover{text-decoration:underline}\n" +
+        "h2{color:#58a6ff;border-bottom:1px solid #30363d;padding-bottom:8px}\n" +
+        "</style></head><body>\n" +
+        "<div class=\"header\"><h1>H# Documentation</h1>" +
+        "<p style=\"color:#8b949e\">Generated by <code>bytes doc</code> — H# v0.8</p></div>\n" +
+        "<div class=\"content\">\n"
+
+    ;; Group by module
+    let mut modules: [string] = []
+    let mut j: int = 0
+    while j < item_count is
+        let m: string = items[j].module
+        let mut found: bool = false
+        let mut k: int = 0
+        while k < array_len(modules) is
+            if modules[k] == m is found = true end
+            k += 1
+        end
+        if !found is modules = array_push(modules, m) end
+        j += 1
+    end
+
+    let mn: int = array_len(modules)
+    let mut mi: int = 0
+    while mi < mn is
+        let module: string = modules[mi]
+        let safe_name: string = sanitise_filename(module)
+        ;; Count items for this module
+        let mut mod_count: int = 0
+        let mut k: int = 0
+        while k < item_count is
+            if items[k].module == module is mod_count += 1 end
+            k += 1
+        end
+        html = html + "<h2><a href=\"" + safe_name + ".html\">" + escape_html(module) +
+               "</a> (" + to_string(mod_count) + " items)</h2>\n"
+
+        ;; Items for this module
+        k = 0
+        while k < item_count is
+            let it: DocItem = items[k]
+            if it.module == module is
+                html = html + "<div class=\"item\">" +
+                    "<div class=\"kind\">" + escape_html(it.kind) + "</div>" +
+                    "<div class=\"name\">" + escape_html(it.name) + "</div>" +
+                    "<div class=\"sig\">" + escape_html(it.signature) + "</div>" +
+                    "<div class=\"doc\">" + escape_html(it.doc) + "</div></div>\n"
+            end
+            k += 1
+        end
+        mi += 1
+    end
+
+    html = html + "</div></body></html>\n"
+    return html
+end
+
+fn render_module_html(module: string, items: [DocItem], item_count: int) -> string is
+    let mut html: string = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">" +
+        "<title>H# - " + escape_html(module) + "</title></head>" +
+        "<body style=\"font-family:sans-serif;background:#0d1117;color:#e6edf3;padding:32px\">" +
+        "<h1 style=\"color:#58a6ff\">" + escape_html(module) + "</h1>" +
+        "<p><a href=\"index.html\" style=\"color:#58a6ff\">← Back to index</a></p>\n"
+
+    let mut i: int = 0
+    while i < item_count is
+        let it: DocItem = items[i]
+        html = html + "<div style=\"background:#161b22;border:1px solid #30363d;" +
+            "border-radius:8px;margin:16px 0;padding:20px\">" +
+            "<div style=\"color:#79c0ff;font-size:.75rem\">" + escape_html(it.kind) + "</div>" +
+            "<div style=\"color:#f0f6fc;font-weight:bold\">" + escape_html(it.name) + "</div>" +
+            "<pre style=\"color:#d2a8ff;background:#0d1117;padding:8px;border-radius:4px\">" +
+            escape_html(it.signature) + "</pre>" +
+            "<div style=\"color:#c9d1d9;white-space:pre-wrap\">" + escape_html(it.doc) + "</div></div>\n"
+        i += 1
+    end
+
+    html = html + "</body></html>\n"
+    return html
+end
+
+pub fn cmd_doc(out_dir_arg: string, verbose: bool) -> int is
+    write("")
+    write("  \x1b[1;36mbytes doc\x1b[0m  H# Doc Generator")
+    write("")
+
+    let out_dir: string = if out_dir_arg != "" then out_dir_arg else "docs/generated" 
+    if !dir_exists(out_dir) is dir_create(out_dir) end
+
+    let files:   [string] = collect_hsharp_files()
+    let fn_count: int     = array_len(files)
+
+    if fn_count == 0 is
+        write("  \x1b[2mNo .h# files found.\x1b[0m")
+        return 0
+    end
+
+    let mut all_items:   [DocItem] = []
+    let mut total_count: int       = 0
+    let mut i: int = 0
+
+    while i < fn_count is
+        let file: string = files[i]
+        if !file_exists(file) is i += 1 continue end
+        let src:   string   = file_read(file)
+        let items: [DocItem] = extract_doc_items(src, file)
+        let ni:    int      = array_len(items)
+        let mut j: int = 0
+        while j < ni is
+            all_items   = array_push(all_items, items[j])
+            total_count += 1
+            j += 1
+        end
+        i += 1
+    end
+
+    ;; Write index.html
+    let index_html: string = render_index_html(all_items, total_count)
+    file_write(out_dir + "/index.html", index_html)
+
+    ;; Write per-module pages
+    ;; Collect unique modules
+    let mut modules: [string] = []
+    let mut k: int = 0
+    while k < total_count is
+        let m: string = all_items[k].module
+        let mut found: bool = false
+        let mut j: int = 0
+        while j < array_len(modules) is
+            if modules[j] == m is found = true end
+            j += 1
+        end
+        if !found is modules = array_push(modules, m) end
+        k += 1
+    end
+
+    let mn: int = array_len(modules)
+    let mut mi: int = 0
+    while mi < mn is
+        let module: string = modules[mi]
+        ;; Collect items for this module
+        let mut mod_items:  [DocItem] = []
+        let mut mod_count:  int       = 0
+        let mut j: int = 0
+        while j < total_count is
+            if all_items[j].module == module is
+                mod_items  = array_push(mod_items, all_items[j])
+                mod_count += 1
+            end
+            j += 1
+        end
+        let page_html: string = render_module_html(module, mod_items, mod_count)
+        file_write(out_dir + "/" + sanitise_filename(module) + ".html", page_html)
+        mi += 1
+    end
+
+    write("  \x1b[32m✓\x1b[0m  " + to_string(total_count) + " item(s) documented → " +
+          "\x1b[36m" + out_dir + "/index.html\x1b[0m")
+    return 0
+end
