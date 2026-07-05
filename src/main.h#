@@ -1,20 +1,159 @@
-mod cli;
-mod config;
-mod installer;
-mod isolation;
-mod jit;
-mod lockfile;
-mod progress;
-mod python_interop;
-mod registry;
-mod workspace;
-mod fmt_cmd;
-mod test_runner;
-mod doc_gen;
+mod cli
 
-fn main() {
-    cli::run().unwrap_or_else(|e| {
-        eprintln!("  \x1b[1;31merror:\x1b[0m {}", e);
-        std::process::exit(1);
-    });
-}
+extern dynamic [c] is
+    fn exit(code: int)
+end
+
+fn main() is
+    let args:  [string] = env::args()
+    let argc:  int      = array_len(args)
+
+    ;; Parse global flags
+    let mut release: bool   = false
+    let mut verbose: bool   = false
+    let mut file:    string = ""
+    let mut cmd:     string = ""
+    let mut extra:   [string] = []
+
+    let mut i: int = 1  ;; skip argv[0] (binary name)
+    while i < argc is
+        let a: string = args[i]
+        match a is
+            "--version" | "-V" => is cli::print_version() return end
+            "--help"    | "-h" => is cli::print_help()    return end
+            "--release" | "-r" => is release = true end
+            "--verbose" | "-v" => is verbose = true end
+            "--file"    | "-f" => is
+                i += 1
+                if i < argc is file = args[i] end
+            end
+            _ => is
+                if string_starts_with(a, "-") is
+                    extra = array_push(extra, a)
+                else if cmd == "" is
+                    cmd = a
+                else is
+                    extra = array_push(extra, a)
+                end
+            end
+        end
+        i += 1
+    end
+
+    if cmd == "" is
+        cli::print_help()
+        return
+    end
+
+    let extra_count: int = array_len(extra)
+
+    match cmd is
+        "new" => is
+            let name:   string = cli::arg_at(extra, extra_count, 0)
+            let is_lib: bool   = cli::arg_has(extra, extra_count, "--lib")
+            let is_ws:  bool   = false
+            cli::cmd_new(name, is_lib, is_ws)
+        end
+        "new-workspace" | "new-ws" => is
+            let name:   string = cli::arg_at(extra, extra_count, 0)
+            let is_ws:  bool   = true
+            let is_lib: bool   = false
+            cli::cmd_new(name, is_lib, is_ws)
+        end
+        "build" => is
+            cli::cmd_build(extra, extra_count, release, verbose)
+        end
+        "run" => is
+            let run_file:  string   = if file != "" then file
+                                      else if extra_count > 0 && string_ends_with(extra[0], ".h#") then extra[0]
+                                      else ""
+            let run_args:  [string] = if run_file != "" && extra_count > 0 then
+                cli::args_from(extra, extra_count, 1)
+            else extra
+            let run_argc:  int = array_len(run_args)
+            cli::cmd_run(run_file, run_args, run_argc, release, verbose)
+        end
+        "check" => is
+            cli::cmd_check(extra, extra_count, verbose)
+        end
+        "clean" => is
+            let everything: bool = cli::arg_has(extra, extra_count, "--everything")
+            cli::cmd_clean(everything)
+        end
+        "test" => is
+            let filter: string = cli::arg_at(cli::args_positional(extra, extra_count),
+                                             array_len(cli::args_positional(extra, extra_count)), 0)
+            let rc: int = test_runner::cmd_test(extra, extra_count, filter, verbose)
+            if rc != 0 is exit(rc) end
+        end
+        "fmt" | "format" => is
+            let rc: int = fmt_cmd::cmd_fmt(extra, extra_count, verbose)
+            if rc != 0 is exit(rc) end
+        end
+        "doc" => is
+            let out_dir: string = cli::arg_at(cli::args_positional(extra, extra_count),
+                                              array_len(cli::args_positional(extra, extra_count)), 0)
+            let rc: int = doc_gen::cmd_doc(out_dir, verbose)
+            if rc != 0 is exit(rc) end
+        end
+        "add" => is
+            let pkg:     string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            let version: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 1)
+            if string_starts_with(pkg, "python:") || string_starts_with(pkg, "py:") is
+                let py_name: string = string_replace(string_replace(pkg, "python:", ""), "py:", "")
+                cli::cmd_python_pkg(py_name, version)
+            else is
+                cli::cmd_add(pkg, version, release)
+            end
+        end
+        "remove" | "rm" => is
+            let pkg: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            cli::cmd_remove(pkg)
+        end
+        "install" => is
+            cli::cmd_install(verbose, release)
+        end
+        "update" => is
+            cli::cmd_update()
+        end
+        "list" | "ls" => is
+            cli::cmd_list()
+        end
+        "search" => is
+            let q: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            cli::cmd_search(q)
+        end
+        "info" => is
+            let pkg: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            cli::cmd_info_pkg(pkg)
+        end
+        "python" => is
+            let pkg: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            let ver: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 1)
+            cli::cmd_python_pkg(pkg, ver)
+        end
+        "workspace" | "ws" => is
+            let sub:  string   = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            let rest: [string] = cli::args_from(cli::args_positional(extra, extra_count),
+                                                array_len(cli::args_positional(extra, extra_count)), 1)
+            let sub_name: string = if sub == "" then "info" else sub 
+            cli::cmd_workspace(sub_name, rest, array_len(rest), release, verbose)
+        end
+        "cache" => is
+            cli::cmd_cache_info()
+        end
+        "langs" | "languages" => is
+            cli::cmd_langs()
+        end
+        _ => is
+            ;; Try running file directly (e.g. `bytes main.h#`)
+            if string_ends_with(cmd, ".h#") || string_ends_with(cmd, ".hsp") is
+                cli::cmd_run(cmd, extra, extra_count, release, verbose)
+            else is
+                write("  \x1b[31merror:\x1b[0m unknown command '" + cmd + "'")
+                write("  Run 'bytes --help' for usage")
+                exit(1)
+            end
+        end
+    end
+end
