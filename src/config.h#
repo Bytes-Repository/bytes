@@ -16,6 +16,15 @@ pub struct BuildConfig is
     pub parallel:    bool
     pub cache_dir:   string
     pub build_order: string
+    ;; Project-wide default `MemoryMode` ("default"/"safety"/"arc"/
+    ;; "arena"/"pointers", or "" for none) — passed to `hsharp compile`/
+    ;; `build` as `--mem-mode <value>` (see build.h#'s build_single) so
+    ;; every file in the project falls back to it unless it has its own
+    ;; `@: mode` first line, or a given function has its own `@mode`
+    ;; annotation (both of those still win over this). Lets a whole
+    ;; project opt into e.g. `@safety` from one place in bytes.hk instead
+    ;; of a `@: safety` line copy-pasted into every single source file.
+    pub mem_mode:    string
 end
 
 pub struct DepEntry is
@@ -52,7 +61,7 @@ pub fn default_project() -> Project is
         build: BuildConfig {
             lang: "h#", entry: "src/main.h#", output: "build/main",
             emit: "bin", flags: "", parallel: false,
-            cache_dir: "build/cache", build_order: ""
+            cache_dir: "build/cache", build_order: "", mem_mode: ""
         },
         workspace: WorkspaceConfig {
             name: "", version: "", mode: "standard",
@@ -148,6 +157,7 @@ pub fn parse(content: string) -> Project is
                     "parallel"    => is proj.build.parallel    = val == "true" end
                     "cache"       => is proj.build.cache_dir   = val end
                     "build-order" => is proj.build.build_order = val end
+                    "mem-mode"    => is proj.build.mem_mode    = val end
                     _ => is end
                 end
             end
