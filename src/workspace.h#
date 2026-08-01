@@ -108,8 +108,9 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
             let emit_arg: string = if file_exists(member_hk) is
                 let mp: config::Project = config::load_path(member_hk)
                 let e: string = mp.build.emit
-                if e != "" && e != "bin" then " --emit " + e else "" 
+                if e != "" && e != "bin" then " --emit " + e else "" end
             else ""
+            end
 
             let cmd: string = hsh + " compile " + entry + " -o " + out + rel_flag + emit_arg
             output  = capture(cmd)
