@@ -42,8 +42,12 @@ pub fn build_single(proj: config::Project, release: bool, verbose: bool) -> int 
     let flags:     string = if proj.build.flags != "" then " " + proj.build.flags else "" 
     let rel_flag:  string = if release then " --release" else "" 
     let verb_flag: string = if verbose then " --verbose" else "" 
+    ;; See config.h#'s `BuildConfig.mem_mode` doc comment — a project-wide
+    ;; `MemoryMode` fallback from bytes.hk, weaker than a function's own
+    ;; `@mode` and weaker than its file's `@: mode` first line.
+    let mem_arg:   string = if proj.build.mem_mode != "" then " --mem-mode " + proj.build.mem_mode else ""
 
-    let cmd: string = hsh + " compile " + entry + " -o " + out + emit_arg + flags + rel_flag + verb_flag
+    let cmd: string = hsh + " compile " + entry + " -o " + out + emit_arg + flags + rel_flag + verb_flag + mem_arg
 
     let t0:  int = time_ms()
     let rc:  int = system(cmd)
