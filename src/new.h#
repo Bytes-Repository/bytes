@@ -35,7 +35,7 @@ pub fn cmd_new_scaffold(
         dir_create(name + "/" + member)
         dir_create(name + "/" + member + "/src")
         dir_create(name + "/" + member + "/build")
-        file_write(name + "/" + member + "/bytes.hk",
+        file_write(name + "/" + member + "/Bytes.hk",
             "[package]\n-> name    => " + member + "\n-> version => 0.1.0\n\n" +
             "[build]\n-> lang   => h#\n-> entry  => src/main.h#\n" +
             "-> output => build/" + member + "\n")
@@ -44,20 +44,20 @@ pub fn cmd_new_scaffold(
         write("  \x1b[2mMember:\x1b[0m  " + member + "/")
     else if is_lib is
         ;; Library
-        file_write(name + "/bytes.hk", config::tpl_lib_hk(name))
+        file_write(name + "/Bytes.hk", config::tpl_lib_hk(name))
         file_write(name + "/src/lib.h#", config::tpl_lib_source(name))
         write("  \x1b[32mCreated:\x1b[0m \x1b[1m" + name + "\x1b[0m (library)")
         write("  \x1b[2mEntry:\x1b[0m   src/lib.h#")
     else is
         ;; Binary
-        file_write(name + "/bytes.hk", config::tpl_package(name))
+        file_write(name + "/Bytes.hk", config::tpl_package(name))
         file_write(name + "/src/main.h#", config::tpl_main(name))
         write("  \x1b[32mCreated:\x1b[0m \x1b[1m" + name + "\x1b[0m (binary)")
         write("  \x1b[2mEntry:\x1b[0m   src/main.h#")
     end
 
     file_write(name + "/.gitignore", config::tpl_gitignore())
-    write("  \x1b[2mConfig:\x1b[0m  bytes.hk")
+    write("  \x1b[2mConfig:\x1b[0m  Bytes.hk")
     write("")
     write("  \x1b[1mNext:\x1b[0m")
     write("    cd " + name)
@@ -74,5 +74,5 @@ fn write_ws_hk(name: string, mode: string) is
         "-> members => [\"" + name + "-core\"]\n" +
         if mode == "special" then "-> languages\n--> " + name + "-core => h#\n" else ""  +
         "\n[build]\n-> parallel    => false\n-> cache       => build/cache/\n"
-    file_write(name + "/bytes.hk", content)
+    file_write(name + "/Bytes.hk", content)
 end
