@@ -94,8 +94,8 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
 
     match lang is
         "h#" | "hsharp" => is
-            ;; Read member bytes.hk for entry/emit
-            let member_hk: string = member_dir + "/bytes.hk"
+            ;; Read member Bytes.hk for entry/emit
+            let member_hk: string = member_dir + "/Bytes.hk"
             let entry: string = if file_exists(member_hk) is
                 let mp: config::Project = config::load_path(member_hk)
                 config::build_entry(mp)
@@ -104,7 +104,7 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
             let out: string = member_dir + "/build/main"
             let hsh: string = find_hsh()
 
-            ;; Check for --emit in member bytes.hk
+            ;; Check for --emit in member Bytes.hk
             let emit_arg: string = if file_exists(member_hk) is
                 let mp: config::Project = config::load_path(member_hk)
                 let e: string = mp.build.emit
