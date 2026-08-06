@@ -196,7 +196,12 @@ end
 ;; ── File finders ─────────────────────────────────────────────────────────────
 
 pub fn find_hk() -> string is
-    let candidates: [string] = ["bytes.hk", "Bytes.hk", "bytes.toml", "Bytes.toml"]
+    ;; `Bytes.hk` is the canonical name (checked first) — `bytes.hk` and
+    ;; the old `.toml` names are still recognized for backward
+    ;; compatibility with existing projects, but every new project (see
+    ;; new.h#) and every place bytes.hk itself *writes* a config file now
+    ;; canonically uses `Bytes.hk`.
+    let candidates: [string] = ["Bytes.hk", "bytes.hk", "Bytes.toml", "bytes.toml"]
     for c in candidates is
         if file_exists(c) is return c end
     end
@@ -210,7 +215,7 @@ pub fn find_hk_upward() -> string is
     let mut dir: string = ".."
     let mut depth: int = 0
     while depth < 5 is
-        for name in ["bytes.hk", "Bytes.hk"] is
+        for name in ["Bytes.hk", "bytes.hk"] is
             let p: string = dir + "/" + name
             if file_exists(p) is return p end
         end
@@ -223,8 +228,8 @@ end
 pub fn load() -> Project is
     let path: string = find_hk()
     if path == "" is
-        write("  \x1b[31merror:\x1b[0m bytes.hk nicht gefunden")
-        write("  Führe 'bytes new <name>' aus")
+        write("  \x1b[31merror:\x1b[0m Bytes.hk not found")
+        write("  Run 'bytes new <name>' to create a project")
         exit(1)
     end
     let mut proj: Project = parse(file_read(path))
