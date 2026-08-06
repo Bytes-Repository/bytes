@@ -132,17 +132,17 @@ fn cmd_new(name: string, is_lib: bool, is_ws: bool) is
     dir_create(name + "/docs")
 
     if is_ws is
-        file_write(name + "/bytes.hk", config::tpl_workspace(name))
+        file_write(name + "/Bytes.hk", config::tpl_workspace(name))
         dir_create(name + "/" + name + "-core/src")
-        file_write(name + "/" + name + "-core/bytes.hk",
+        file_write(name + "/" + name + "-core/Bytes.hk",
             "[package]\n-> name => " + name + "-core\n-> version => 0.1.0\n\n" +
             "[build]\n-> lang  => h#\n-> entry => src/main.h#\n")
         file_write(name + "/" + name + "-core/src/main.h#", config::tpl_main(name + "-core"))
     else if is_lib is
-        file_write(name + "/bytes.hk", config::tpl_lib_hk(name))
+        file_write(name + "/Bytes.hk", config::tpl_lib_hk(name))
         file_write(name + "/src/lib.h#", config::tpl_lib_source(name))
     else is
-        file_write(name + "/bytes.hk", config::tpl_package(name))
+        file_write(name + "/Bytes.hk", config::tpl_package(name))
         file_write(name + "/src/main.h#", config::tpl_main(name))
     end
 
@@ -151,7 +151,7 @@ fn cmd_new(name: string, is_lib: bool, is_ws: bool) is
     write("  \x1b[32mCreated:\x1b[0m \x1b[1m" + name + "\x1b[0m" +
           if is_ws then " (workspace)" else if is_lib then " (library)" else " (binary)"  )
     write("  \x1b[2mEntry:  \x1b[0m " + if is_lib then "src/lib.h#" else "src/main.h#" )
-    write("  \x1b[2mConfig: \x1b[0m bytes.hk")
+    write("  \x1b[2mConfig: \x1b[0m Bytes.hk")
     write("")
     write("  \x1b[1mNext:\x1b[0m  cd " + name + " && bytes run")
     write("")
@@ -194,7 +194,7 @@ fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool) is
     let emit: string = proj.build.emit
     if emit != "" && emit != "bin" is emit_arg = " --emit " + emit end
 
-    ;; Build flags from bytes.hk [build] -> flags
+    ;; Build flags from Bytes.hk [build] -> flags
     let extra_flags: string = if proj.build.flags != "" then " " + proj.build.flags else "" 
 
     let mut cmd: string = hsh + " compile " + entry + " -o " + out + emit_arg + extra_flags
@@ -421,7 +421,7 @@ fn cmd_workspace(sub: string, extra: [string], extra_count: int, release: bool, 
             print_header()
             let proj: config::Project = config::load()
             if !proj.has_workspace is
-                write("  \x1b[2mNot a workspace (no [workspace] in bytes.hk)\x1b[0m")
+                write("  \x1b[2mNot a workspace (no [workspace] in Bytes.hk)\x1b[0m")
                 return
             end
             write("  \x1b[1mWorkspace:\x1b[0m " + proj.workspace.name + " v" + proj.workspace.version)
