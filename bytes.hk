@@ -2,8 +2,8 @@
 -> name        => bytes
 -> version     => 0.8.0
 -> description => H# Package Manager
--> author      => HackerOS Team
--> license     => Apache-2.0
+-> author      => HackerOS
+-> license     => MIT
 
 [build]
 -> lang   => h#
