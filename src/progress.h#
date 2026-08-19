@@ -2,6 +2,8 @@ extern dynamic [c] is
     fn system(cmd: string) -> int
 end
 
+mod settings
+
 ;; ── Spinner ───────────────────────────────────────────────────────────────────
 
 pub struct Spinner is
@@ -37,50 +39,162 @@ pub fn spinner_fail(s: Spinner, err_msg: string) is
 end
 
 ;; ── Progress bar ─────────────────────────────────────────────────────────────
+;; Themes are just four characters + an optional arrowhead — everything
+;; else (rendering, colors, ETA, `bytes settings` preview/picker) is driven
+;; off this one table, so adding a new style is a one-line addition here:
+;;
+;;   name        open  close  fill  empty  arrow   looks like
+;;   "default"    <      >     #      -      ""     <###----------------->
+;;   "arrow"      [      ]     -            (spc)   ">"     [--->      ]
+;;   "dotted"     <      >     -      .      ""     <----........>
+;;   "cargo"      [      ]     =            (spc)   ">"     [===>       ]
+;;   "equals"     <      >     =      -      ""     <=====------->
+;;   "blocks"     [      ]     █      ░      ""     [████░░░░░░]
+;;
+;; "default" is what every bar uses unless the user picked something else
+;; via `bytes settings` (saved as `bar_theme` in ~/.hackeros/H#/settings.hk).
+
+fn theme_open(theme: string) -> string is
+    let ch: string = match theme is
+        "arrow" | "cargo" | "blocks" => "["
+        _                            => "<"
+    end
+    return ch
+end
+
+fn theme_close(theme: string) -> string is
+    let ch: string = match theme is
+        "arrow" | "cargo" | "blocks" => "]"
+        _                            => ">"
+    end
+    return ch
+end
+
+fn theme_fill(theme: string) -> string is
+    let ch: string = match theme is
+        "arrow"           => "-"
+        "cargo"           => "="
+        "dotted"          => "-"
+        "equals"          => "="
+        "blocks"          => "█"
+        _                 => "#"    ;; "default"
+    end
+    return ch
+end
+
+fn theme_empty(theme: string) -> string is
+    let ch: string = match theme is
+        "arrow"           => " "
+        "cargo"           => " "
+        "dotted"          => "."
+        "equals"          => "-"
+        "blocks"          => "░"
+        _                 => "-"    ;; "default"
+    end
+    return ch
+end
+
+fn theme_arrowhead(theme: string) -> string is
+    let ch: string = match theme is
+        "arrow" | "cargo" => ">"
+        _                 => ""
+    end
+    return ch
+end
+
+pub fn theme_names() -> [string] is
+    return ["default", "arrow", "dotted", "cargo", "equals", "blocks"]
+end
+
+;; Plain (uncolored) sample of a theme at ~40% fill, for `bytes settings`'s
+;; picker preview.
+pub fn theme_preview(theme: string) -> string is
+    let width:  int    = 16
+    let filled: int    = (width * 4) / 10
+    let empty:  int    = width - filled
+    let head:   string = theme_arrowhead(theme)
+
+    let mut fill_str: string = ""
+    if head != "" && filled > 0 is
+        fill_str = string_repeat(theme_fill(theme), filled - 1) + head
+    else is
+        fill_str = string_repeat(theme_fill(theme), filled)
+    end
+
+    return theme_open(theme) + fill_str + string_repeat(theme_empty(theme), empty) + theme_close(theme)
+end
+
+;; "default" is a sentinel meaning "whatever the user configured (or the
+;; built-in default if they haven't)" — anything else passed to `bar_new`
+;; is used verbatim, so call sites can still force a specific theme.
+fn resolve_theme(requested: string) -> string is
+    if requested == "default" is
+        return settings::settings_get("bar_theme", "default")
+    end
+    return requested
+end
 
 pub struct ProgressBar is
     pub total:   int
     pub current: int
     pub width:   int
-    pub theme:   string    ;; "default" | "arrow" | "cargo"
+    pub theme:   string
     pub label:   string
 end
 
 pub fn bar_new(total: int, theme: string, label: string) -> ProgressBar is
-    return ProgressBar { total: total, current: 0, width: 40, theme: theme, label: label }
+    return ProgressBar { total: total, current: 0, width: 20, theme: resolve_theme(theme), label: label }
+end
+
+fn bar_render_bar(b: ProgressBar, filled: int, empty: int) -> string is
+    let head: string = theme_arrowhead(b.theme)
+
+    let mut fill_str: string = ""
+    if head != "" && filled > 0 is
+        fill_str = string_repeat(theme_fill(b.theme), filled - 1) + head
+    else is
+        fill_str = string_repeat(theme_fill(b.theme), filled)
+    end
+
+    return "\x1b[36m" + theme_open(b.theme) + "\x1b[0m\x1b[36m\x1b[1m" + fill_str + "\x1b[0m\x1b[2m" +
+           string_repeat(theme_empty(b.theme), empty) + "\x1b[0m\x1b[36m" + theme_close(b.theme) + "\x1b[0m"
+end
+
+fn bar_line(b: ProgressBar) -> string is
+    let pct:    int = if b.total > 0 then (b.current * 100) / b.total else 100 
+    let filled: int = if b.total > 0 then (b.current * b.width) / b.total else b.width 
+    let empty:  int = b.width - filled
+
+    let bar_str: string = bar_render_bar(b, filled, empty)
+    let pct_str: string = "\x1b[33m\x1b[1m" + to_string(pct) + "%\x1b[0m"
+
+    let mut eta_str: string = ""
+    if pct > 0 && pct < 100 is
+        let remaining: int = b.total - b.current
+        let rate:      int = if b.current > 1 then b.current else 1 
+        eta_str = "\x1b[2m ~" + to_string(remaining / rate) + "s\x1b[0m"
+    end
+
+    return bar_str + " " + pct_str + " " + eta_str + string_repeat(" ", 10) +
+           "  \x1b[36m" + b.label + "\x1b[0m"
 end
 
 pub fn bar_inc(b: ProgressBar, n: int) -> ProgressBar is
     let new_cur: int = if b.current + n > b.total then b.total else b.current + n 
-    let pct: int     = if b.total > 0 then (new_cur * 100) / b.total else 0 
-    let filled: int  = if b.total > 0 then (new_cur * b.width) / b.total else 0 
-
-    let mut bar_str: string = "["
-    let mut j: int = 0
-    while j < b.width is
-        if j < filled is
-            bar_str = bar_str + if b.theme == "arrow" then "=" else "█" 
-        else if j == filled is
-            bar_str = bar_str + if b.theme == "arrow" then ">" else "░" 
-        else is
-            bar_str = bar_str + if b.theme == "arrow" then "-" else "░" 
-        end
-        j += 1
-    end
-    bar_str = bar_str + "]"
-
-    io_print("\r  \x1b[36m" + b.label + "\x1b[0m " + bar_str + " " +
-             to_string(pct) + "%  ")
-
-    return ProgressBar {
-        total: b.total, current: new_cur,
-        width: b.width, theme: b.theme, label: b.label
+    let updated: ProgressBar = ProgressBar {
+        total: b.total, current: new_cur, width: b.width, theme: b.theme, label: b.label
     }
+    io_print("\r" + bar_line(updated))
+    return updated
 end
 
 pub fn bar_finish(b: ProgressBar, msg: string) is
-    let full_bar: string = "[" + string_repeat("█", b.width) + "]"
-    io_print("\r  \x1b[32m✓\x1b[0m \x1b[36m" + b.label + "\x1b[0m " + full_bar + " 100% " + msg + "\n")
+    let done: ProgressBar = ProgressBar {
+        total: b.total, current: b.total, width: b.width, theme: b.theme, label: b.label
+    }
+    io_print("\r" + bar_line(done))
+    write("")
+    write("  \x1b[32m\x1b[1m✓\x1b[0m \x1b[1m" + msg + "\x1b[0m")
 end
 
 ;; ── Timing ───────────────────────────────────────────────────────────────────
