@@ -66,7 +66,11 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
     let t0: int = time_ms()
 
     ;; Canonicalize member dir — try CWD first, then BYTES_WORKSPACE_ROOT
-    let mut member_dir: string = name
+    ;; NOTE: `name + ""` (not a bare `let x: string = name`) on purpose —
+    ;; a plain identifier RHS registers as a *move* of `name` under
+    ;; @default/@safety's move-after-use check, and `name` is still read
+    ;; many times below (error messages, the returned MemberStatus, …).
+    let mut member_dir: string = name + ""
     if !dir_exists(name) is
         let ws_root: string = getenv("BYTES_WORKSPACE_ROOT")
         if ws_root != "" is
@@ -76,7 +80,7 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
     end
 
     if !dir_exists(member_dir) is
-        return progress::MemberStatus {
+        return MemberStatus {
             name: name, lang: lang, success: false,
             output: "directory '" + name + "' not found",
             elapsed: time_ms() - t0
@@ -174,7 +178,7 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
         end
     end
 
-    return progress::MemberStatus {
+    return MemberStatus {
         name: name, lang: lang, success: success,
         output: output, elapsed: time_ms() - t0
     }
