@@ -1,0 +1,89 @@
+extern dynamic [c] is
+    fn getenv(name: string) -> string
+end
+
+pub fn settings_dir() -> string is
+    let home:     string = getenv("HOME")
+    let home_dir: string = if home == "" then "." else home 
+    return home_dir + "/.hackeros/H#"
+end
+
+pub fn settings_path() -> string is
+    return settings_dir() + "/settings.hk"
+end
+
+pub fn settings_ensure_dir() is
+    let d: string = settings_dir()
+    if !dir_exists(d) is dir_create(d) end
+end
+
+;; Reads a `-> key => value` entry. Returns `fallback` if the file, or the
+;; key inside it, doesn't exist.
+pub fn settings_get(key: string, fallback: string) -> string is
+    let path: string = settings_path()
+    if !file_exists(path) is return fallback end
+
+    let content: string = file_read(path)
+    let lines:   [string] = string_split(content, "\n")
+    let prefix:  string = "-> " + key + " => "
+
+    let mut i: int = 0
+    let n: int = array_len(lines)
+    while i < n is
+        let line: string = string_trim(lines[i])
+        if string_starts_with(line, prefix) is
+            return string_trim(string_replace(line, prefix, ""))
+        end
+        i += 1
+    end
+    return fallback
+end
+
+;; Writes/updates a single `-> key => value` entry, preserving every other
+;; line already in the file — setting the bar theme must not clobber a
+;; previously saved backend preference, and vice versa.
+pub fn settings_set(key: string, value: string) is
+    settings_ensure_dir()
+    let path:     string = settings_path()
+    let existing: string = if file_exists(path) then file_read(path) else "[defaults]\n" 
+
+    let lines:  [string] = string_split(existing, "\n")
+    let prefix: string   = "-> " + key + " => "
+
+    let mut kept: [string] = []
+    let mut i: int = 0
+    let n: int = array_len(lines)
+    while i < n is
+        let line: string = lines[i]
+        if string_trim(line) != "" && !string_starts_with(string_trim(line), prefix) is
+            kept = array_push(kept, line)
+        end
+        i += 1
+    end
+
+    let mut out: string = ""
+    let mut ki: int = 0
+    let kn: int = array_len(kept)
+    while ki < kn is
+        out = out + kept[ki] + "\n"
+        ki += 1
+    end
+    out = out + prefix + value + "\n"
+
+    file_write(path, out)
+end
+
+;; Deletes the whole settings file, resetting every preference to its
+;; built-in fallback.
+pub fn settings_reset() is
+    let path: string = settings_path()
+    if file_exists(path) is file_delete(path) end
+end
+
+;; Raw contents for display (used by `bytes settings` -> "show current
+;; settings"). Returns "" if nothing has been saved yet.
+pub fn settings_dump() -> string is
+    let path: string = settings_path()
+    if !file_exists(path) is return "" end
+    return file_read(path)
+end
