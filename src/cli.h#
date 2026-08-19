@@ -8,6 +8,7 @@ mod lockfile
 mod fmt_cmd
 mod test_runner
 mod doc_gen
+mod settings
 mod isolation
 mod python_interop
 
@@ -105,6 +106,7 @@ pub fn print_help() is
     write("")
     write("  \x1b[1mUtilities:\x1b[0m")
     write("    \x1b[36mcache\x1b[0m                             cache information")
+    write("    \x1b[36msettings\x1b[0m                          interactive settings menu")
     write("    \x1b[36mlangs\x1b[0m                             supported languages")
     write("    \x1b[36m--version\x1b[0m | -V                   show version")
     write("")
@@ -474,6 +476,95 @@ fn cmd_cache_info() is
     system("du -sh " + base + " 2>/dev/null | awk '{print \"    Global size: \" $1}'")
     system("du -sh build/cache/ 2>/dev/null | awk '{print \"    Local size:  \" $1}'")
     write("")
+end
+
+;; ── Settings ─────────────────────────────────────────────────────────────────
+;; Rozbudowana wersja `do_settings()` z rustowej `bytes` — te same zasady
+;; (menu numerowane, pojedynczy wybór, zapis do pliku), więcej opcji:
+;;   [1] Default backend (release/debug)
+;;   [2] Progress bar style   -> lista z podglądem, zapis jako `bar_theme`
+;;   [3] Clear project cache  -> czyści build/cache
+;;   [4] Show cache size      -> rozmiar build/cache
+;;   [5] Show current settings -> zrzut ~/.hackeros/H#/settings.hk
+;;   [6] Reset settings to defaults -> usuwa plik ustawień
+;;   [q] Quit -> bez akcji
+;;
+;; Uwaga: H# ma dziś jeden kompilator (`h#`) z jednym backendem (LLVM) —
+;; nie ma już osobnych binarek `hhc`/`cranelift`. Tryb wybiera się flagą
+;; --release (LLVM O3 + LTO) albo jej brakiem (LLVM O0, debug), więc to
+;; jedyne dwie sensowne wartości do zapamiętania jako domyślne.
+
+;; Reads a single line of interactive input. `system()` is a real libc
+;; FFI call once compiled (not a sandboxed subprocess pipe), so it
+;; inherits the real terminal's stdio — this is the same round-trip
+;; technique `cmd_build` already uses to capture `pwd`.
+fn read_input(prompt: string) -> string is
+    io_print(prompt)
+    let tmp: string = "/tmp/.bytes_settings_input_" + to_string(proc_id()) + "_" + to_string(time_ms())
+    system("read -r __bytes_in; printf '%s' \"$__bytes_in\" > '" + tmp + "'")
+    let val: string = string_trim(file_read(tmp))
+    system("rm -f '" + tmp + "'")
+    return val
+end
+
+fn cmd_settings() is
+    write("\x1b[1m\x1b[36mbytes settings\x1b[0m")
+    write("  \x1b[2mConfig: " + settings::settings_path() + "\x1b[0m")
+    write("")
+    write("  \x1b[1m[1]\x1b[0m Default backend (release/debug)")
+    write("  \x1b[1m[2]\x1b[0m Progress bar style")
+    write("  \x1b[1m[3]\x1b[0m Clear project cache")
+    write("  \x1b[1m[4]\x1b[0m Show cache size")
+    write("  \x1b[1m[5]\x1b[0m Show current settings")
+    write("  \x1b[1m[6]\x1b[0m Reset settings to defaults")
+    write("  \x1b[1m[q]\x1b[0m Quit")
+
+    let choice: string = read_input("\n  Choice: ")
+
+    if choice == "1" is
+        let backend: string = read_input("  Backend [release/debug]: ")
+        settings::settings_set("backend", backend)
+        write("  \x1b[32m✓\x1b[0m saved")
+    else if choice == "2" is
+        write("")
+        let names: [string] = progress::theme_names()
+        let n:     int      = array_len(names)
+        let current: string = settings::settings_get("bar_theme", "default")
+
+        let mut i: int = 0
+        while i < n is
+            let marker: string = if names[i] == current then "\x1b[32m*\x1b[0m" else " " 
+            write("  " + marker + " \x1b[1m[" + to_string(i + 1) + "]\x1b[0m " +
+                  string_pad_right(names[i], 9) + " \x1b[36m" + progress::theme_preview(names[i]) + "\x1b[0m")
+            i += 1
+        end
+
+        let pick: string = read_input("\n  Choice: ")
+        let idx:  int     = to_int(pick) - 1
+        if idx >= 0 && idx < n is
+            settings::settings_set("bar_theme", names[idx])
+            write("  \x1b[32m✓\x1b[0m bar theme set to \x1b[36m" + names[idx] + "\x1b[0m " + progress::theme_preview(names[idx]))
+        else is
+            write("  \x1b[31m✗\x1b[0m invalid choice")
+        end
+    else if choice == "3" is
+        dir_remove_all("build/cache")
+        write("  \x1b[32m✓\x1b[0m build/cache removed")
+    else if choice == "4" is
+        system("du -sh build/cache 2>/dev/null | awk '{print \"  Cache: \" $1}' || echo '  Cache: 0'")
+    else if choice == "5" is
+        let dump: string = settings::settings_dump()
+        if dump == "" is
+            write("  \x1b[2m(no settings saved yet — using built-in defaults)\x1b[0m")
+        else is
+            write("")
+            write("  \x1b[2m" + settings::settings_path() + "\x1b[0m")
+            write(dump)
+        end
+    else if choice == "6" is
+        settings::settings_reset()
+        write("  \x1b[32m✓\x1b[0m settings reset to defaults")
+    end
 end
 
 fn cmd_langs() is
