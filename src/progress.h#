@@ -188,6 +188,33 @@ pub fn bar_inc(b: ProgressBar, n: int) -> ProgressBar is
     return updated
 end
 
+;; Redraws the bar at its CURRENT progress without advancing it — for
+;; putting it back up after `bar_clear()` made room for an interleaved
+;; log line, without double-counting that line as progress.
+pub fn bar_redraw(b: ProgressBar) is
+    io_print("\r" + bar_line(b))
+end
+
+;; ── "Pinned bottom line" bar, Cargo-style ───────────────────────────────────
+;; EXPANSION: a bar that's actually pinned to the bottom of the terminal
+;; the way Cargo's/npm's is — always the last line on screen, with every
+;; other log line scrolling above it — instead of what `bar_inc` alone
+;; produces when called in a loop: each call's `\r`-redraw gets sealed in
+;; place as its OWN permanent line the moment anything else is `write()`n
+;; afterwards (a bare newline finalizes whatever was last drawn on that
+;; row), so the bar looks like it's printing a brand new static line
+;; after every single build step instead of updating in place.
+;;
+;; The fix is the same trick every terminal progress bar uses without a
+;; scroll-region: before printing a REAL line, erase the bar's row first
+;; (`bar_clear`); print the real content, which ends in a newline and so
+;; permanently advances past it; then immediately redraw the bar on the
+;; new, now-empty last row (`bar_redraw`/`bar_inc`, no trailing newline). The
+;; bar is only ever "sealed" with a real newline once, at the very end.
+pub fn bar_clear() is
+    io_print("\r" + string_repeat(" ", 100) + "\r")
+end
+
 pub fn bar_finish(b: ProgressBar, msg: string) is
     let done: ProgressBar = ProgressBar {
         total: b.total, current: b.total, width: b.width, theme: b.theme, label: b.label
@@ -195,6 +222,35 @@ pub fn bar_finish(b: ProgressBar, msg: string) is
     io_print("\r" + bar_line(done))
     write("")
     write("  \x1b[32m\x1b[1m✓\x1b[0m \x1b[1m" + msg + "\x1b[0m")
+end
+
+;; ── Indeterminate bar ────────────────────────────────────────────────────────
+;; EXPANSION: renders one frame of a "we don't know %, but here's motion"
+;; bar in bytes' own theme (open/close/fill/empty chars from the same
+;; theme table `bar_line` uses) — a single highlighted cell bouncing back
+;; and forth across the track, à la a ping-pong loading bar. This is what
+;; `run_with_spinner` now animates with instead of a plain braille
+;; spinner glyph, so a running compile LOOKS like bytes' own progress
+;; bar (matching the user's configured `bar_theme`) rather than a
+;; generic unthemed spinner that doesn't match the rest of the tool.
+fn bar_indeterminate_line(theme: string, width: int, frame: int, label: string) -> string is
+    let period: int = if width <= 1 then 1 else (width - 1) * 2 
+    let phase:  int = frame % period
+    let pos:    int = if phase < width then phase else period - phase 
+
+    let mut track: string = ""
+    let mut i: int = 0
+    while i < width is
+        if i == pos is
+            track = track + theme_fill(theme)
+        else is
+            track = track + theme_empty(theme)
+        end
+        i += 1
+    end
+
+    return "\x1b[36m" + theme_open(theme) + "\x1b[0m\x1b[36m\x1b[1m" + track + "\x1b[0m\x1b[36m" +
+           theme_close(theme) + "\x1b[0m  \x1b[36m" + label + "\x1b[0m"
 end
 
 ;; ── Timing ───────────────────────────────────────────────────────────────────
@@ -209,11 +265,20 @@ end
 ;; ── Build summary printer ────────────────────────────────────────────────────
 
 pub struct MemberStatus is
-    pub name:    string
-    pub lang:    string
-    pub success: bool
-    pub output:  string
-    pub elapsed: int
+    pub name:     string
+    pub lang:     string
+    pub success:  bool
+    pub output:   string
+    pub elapsed:  int
+    ;; EXPANSION: resolved path to the compiled binary/library this
+    ;; member produced (e.g. "isolated/build/isolated"), or "" when the
+    ;; language branch has no single well-known output path to report
+    ;; (cargo/zig put binaries under their own nested target dirs, and
+    ;; the plain python branch only syntax-checks — never fabricate a
+    ;; guessed path for those). Used by build_workspace to also collect
+    ;; every member's binary into one shared top-level `build/` dir,
+    ;; Cargo-`target/`-style — see that call site's comment.
+    pub bin_path: string
 end
 
 pub fn print_member(m: MemberStatus) is
@@ -221,10 +286,18 @@ pub fn print_member(m: MemberStatus) is
     let time_s:  string = elapsed_str(m.elapsed)
     write("  " + icon + " " + string_pad_right(m.name, 20) + " \x1b[2m" + m.lang + " (" + time_s + ")\x1b[0m")
     if !m.success is
+        ;; BUG FIX: this used to hard-cap output to the first 5 lines
+        ;; (`i < 5`), which is enough to show the compiler's error-block
+        ;; HEADER ("-- TYPE ERROR (file) --" + "--> file:line:col") but
+        ;; cuts off *before* the actual "Error: ..." description and
+        ;; "Hint: ..." line that follow a few lines later — i.e. it hid
+        ;; exactly the useful part of every diagnostic. Show the full
+        ;; captured output instead; a build tool should never truncate
+        ;; compiler diagnostics by default.
         let lines:  [string] = string_split(m.output, "\n")
         let n: int = array_len(lines)
         let mut i: int = 0
-        while i < n && i < 5 is
+        while i < n is
             let l: string = string_trim(lines[i])
             if l != "" is write("      \x1b[31m" + l + "\x1b[0m") end
             i += 1
@@ -250,4 +323,92 @@ pub fn print_build_summary(passed: int, failed: int, elapsed_ms: int) is
               " succeeded, " + to_string(failed) + " failed  \x1b[2m(" + elapsed_str(elapsed_ms) + ")\x1b[0m")
     end
     write("")
+end
+
+;; ── Live progress around a blocking shell command ───────────────────────────
+;; EXPANSION: this is what makes `bytes build`/`bytes build --release`
+;; actually show something *while* a member is compiling, instead of
+;; sitting there in total silence for however many seconds until the
+;; command finally returns (all this module's spinner/bar rendering
+;; already existed — nothing in build.h#/workspace.h# ever called it
+;; around the actual compile step, since a plain blocking `system(cmd)`
+;; leaves no opportunity to redraw anything).
+;;
+;; H# has no threads, so there's no way to update the terminal *while*
+;; `system()` blocks on a synchronous child process. The fix used here is
+;; the same one shell scripts have always used to fake a progress
+;; indicator around an opaque subprocess: background the command, poll
+;; for completion in a short `sleep_ms` loop, and redraw the indicator
+;; between polls.
+;;
+;; BUG FIX / EXPANSION (round 2): this used to redraw a plain braille
+;; `Spinner` frame (⠋⠙⠹...) each poll, which doesn't match anything else
+;; in bytes' own UI — every other piece of build/workspace output uses
+;; the themed `<###--------->`-style bar. Swapped to
+;; `bar_indeterminate_line`, so a member compiling now looks like bytes'
+;; own progress bar (and respects the user's `bar_theme` setting) instead
+;; of an unthemed spinner glyph.
+pub fn run_with_spinner(cmd: string, label: string) -> (string, int) is
+    let tmp:        string = "/tmp/bytes_spin_" + to_string(proc_id()) + "_" + to_string(time_ms()) + ".txt"
+    let exit_file:  string = tmp + ".exit"
+    let pid_file:   string = tmp + ".pid"
+
+    ;; Backgrounds "{ cmd >tmp 2>&1; echo $? >exit_file; }" as a single
+    ;; job and captures its PID via $! into pid_file. The `system()` call
+    ;; itself returns almost instantly, since only the trailing
+    ;; `echo $!` runs in the foreground — control comes back to us
+    ;; immediately to start polling.
+    system("{ " + cmd + " >" + tmp + " 2>&1; echo $? >" + exit_file + "; } & echo $! >" + pid_file)
+    let pid: string = string_trim(if file_exists(pid_file) then file_read(pid_file) else "" end)
+
+    let theme: string = resolve_theme("default")
+    let mut frame:   int  = 0
+    let mut running: bool = true
+    while running is
+        if file_exists(exit_file) is
+            running = false
+        else is
+            io_print("\r  " + bar_indeterminate_line(theme, 20, frame, label) + "  ")
+            frame += 1
+            sleep_ms(80)
+            if pid != "" && !file_exists(exit_file) && system("kill -0 " + pid + " 2>/dev/null") != 0 is
+                ;; The process is gone but never wrote exit_file (killed,
+                ;; crashed, OOM-killed, ...) — stop polling instead of
+                ;; spinning forever. Falls through to the "no exit_file"
+                ;; branch below, which reports it as a failure.
+                running = false
+            end
+        end
+    end
+    ;; Clear the spinner's line so the caller's own result line (✓/x)
+    ;; starts clean on it instead of getting appended after a stray frame.
+    io_print("\r" + string_repeat(" ", 70) + "\r")
+
+    let out:  string = if file_exists(tmp) then file_read(tmp) else "" end
+    let code: int    = if file_exists(exit_file) then parse_exit_code_str(file_read(exit_file)) else 1 end
+    if file_exists(tmp)       is file_delete(tmp)       end
+    if file_exists(exit_file) is file_delete(exit_file) end
+    if file_exists(pid_file)  is file_delete(pid_file)  end
+    return (out, code)
+end
+
+;; Minimal "$?"-string -> int parser (always a plain 0-255 digit string,
+;; same approach as workspace.h#'s pre-existing parse_exit_code — kept as
+;; its own small local copy rather than a shared util module, matching
+;; how each of these build-related files already keeps its own tiny
+;; `capture`/`find_hsh` helpers).
+fn parse_exit_code_str(s: string) -> int is
+    let t: string = string_trim(s)
+    let n: int = string_len(t)
+    let mut result: int = 0
+    let mut i: int = 0
+    while i < n is
+        let c: string = string_at(t, i)
+        if c >= "0" && c <= "9" is
+            let d: int = string_find("0123456789", c)
+            result = result * 10 + d
+        end
+        i += 1
+    end
+    return result
 end
