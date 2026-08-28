@@ -16,6 +16,14 @@ pub struct BuildConfig is
     pub parallel:    bool
     pub cache_dir:   string
     pub build_order: string
+    ;; Extra `mod X` search directory, passed through to `h# compile` as
+    ;; `-I <include>` (repeatable in the H# CLI, but bytes.hk only exposes
+    ;; a single directory per project for now — the common case, and the
+    ;; one Isolator's `isolated`/`Bytes.hk` uses to reuse
+    ;; `../source-code/src` directly instead of duplicating files). Empty
+    ;; string means "no extra include dir" (the default, and what every
+    ;; existing project's Bytes.hk without this key gets).
+    pub include:     string
     ;; Project-wide default `MemoryMode` ("default"/"safety"/"arc"/
     ;; "arena"/"pointers", or "" for none) — passed to `hsharp compile`/
     ;; `build` as `--mem-mode <value>` (see build.h#'s build_single) so
@@ -61,7 +69,8 @@ pub fn default_project() -> Project is
         build: BuildConfig {
             lang: "h#", entry: "src/main.h#", output: "build/main",
             emit: "bin", flags: "", parallel: false,
-            cache_dir: "build/cache", build_order: "", mem_mode: ""
+            cache_dir: "build/cache", build_order: "", mem_mode: "",
+            include: ""
         },
         workspace: WorkspaceConfig {
             name: "", version: "", mode: "standard",
@@ -158,6 +167,7 @@ pub fn parse(content: string) -> Project is
                     "cache"       => is proj.build.cache_dir   = val end
                     "build-order" => is proj.build.build_order = val end
                     "mem-mode"    => is proj.build.mem_mode    = val end
+                    "include"     => is proj.build.include     = val end
                     _ => is end
                 end
             end
