@@ -473,8 +473,8 @@ fn cmd_cache_info() is
     write("    \x1b[2mGlobal:\x1b[0m  " + base)
     write("    \x1b[2mLocal:\x1b[0m   build/cache/")
     write("")
-    system("du -sh " + base + " 2>/dev/null | awk '{print \"    Global size: \" $1}'")
-    system("du -sh build/cache/ 2>/dev/null | awk '{print \"    Local size:  \" $1}'")
+    system("du -sh " + base + " 2>/dev/null | awk '{{print \"    Global size: \" $1}}'")
+    system("du -sh build/cache/ 2>/dev/null | awk '{{print \"    Local size:  \" $1}}'")
     write("")
 end
 
@@ -551,7 +551,7 @@ fn cmd_settings() is
         dir_remove_all("build/cache")
         write("  \x1b[32m✓\x1b[0m build/cache removed")
     else if choice == "4" is
-        system("du -sh build/cache 2>/dev/null | awk '{print \"  Cache: \" $1}' || echo '  Cache: 0'")
+        system("du -sh build/cache 2>/dev/null | awk '{{print \"  Cache: \" $1}}' || echo '  Cache: 0'")
     else if choice == "5" is
         let dump: string = settings::settings_dump()
         if dump == "" is
