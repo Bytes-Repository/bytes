@@ -1,16 +1,15 @@
 extern dynamic [c] is
     fn system(cmd: string) -> int
-    fn getenv(name: string) -> string
 end
 
 pub fn hackeros_libs_base() -> string is
-    let home: string = getenv("HOME")
+    let home: string = env_get("HOME")
     if home == "" is return "/tmp/.hackeros/H#/libs" end
     return home + "/.hackeros/H#/libs"
 end
 
 pub fn hackeros_cache_base() -> string is
-    let home: string = getenv("HOME")
+    let home: string = env_get("HOME")
     if home == "" is return "/tmp/.hackeros/H#/build/cache" end
     return home + "/.hackeros/H#/build/cache"
 end
