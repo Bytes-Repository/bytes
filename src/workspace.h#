@@ -3,7 +3,6 @@ mod progress
 
 extern dynamic [c] is
     fn system(cmd: string) -> int
-    fn getenv(name: string) -> string
 end
 
 fn capture(cmd: string) -> string is
@@ -12,6 +11,78 @@ fn capture(cmd: string) -> string is
     let out: string = file_read(tmp)
     file_delete(tmp)
     return out
+end
+
+;; Basename of a path — "isolated/build/isolated" -> "isolated". Used
+;; only for naming the copy collected into the workspace-root `build/`
+;; directory (see build_workspace); doc_gen.h# has its own file_stem
+;; (which also strips an extension) but it isn't `pub`, and stripping an
+;; extension isn't wanted here since these binaries have none.
+fn path_basename(path: string) -> string is
+    let slash: int = string_rfind(path, "/")
+    if slash >= 0 is return string_slice(path, slash + 1, string_len(path)) end
+    return path
+end
+
+;; Single-quote a path for safe use in a shell command (same approach as
+;; util.h#'s shell_quote, copied locally since workspace.h# doesn't `mod
+;; util` for anything else). Needed for the `cp` below: `file_read`/
+;; `file_write` are C-string based and would corrupt a binary at its
+;; first \0 byte, so an actual `cp` is the only safe way to duplicate an
+;; executable.
+fn sh_quote(s: string) -> string is
+    return "'" + string_replace_all(s, "'", "'\\''") + "'"
+end
+
+;; BUG FIX: every language branch below used to run the exact same build
+;; command TWICE — once via `capture(cmd)` to get its output, and again
+;; via a separate `system(cmd + " >/dev/null 2>&1")` just to get the exit
+;; status, throwing that second run's output away. Besides doubling every
+;; member's build time, it's also just wrong for anything with side
+;; effects or non-deterministic timing. `capture_with_status` runs the
+;; command exactly once and returns both the combined output and the real
+;; exit code from that one run, via a shell `; echo` trick that appends
+;; the status after the command's own output into the same capture file.
+;; parse_exit_code converts a plain non-negative digit string (a shell
+;; `$?` exit code, always 0-255) to `int`, without going through the
+;; `parse_int` builtin — which returns `int?` (Optional), and H#'s
+;; typechecker does not reliably narrow that back to plain `int` after an
+;; `== nil` guard (see Isolator-H-Sharp's README for the same issue hit
+;; repeatedly during that port). A small manual digit-by-digit scan
+;; sidesteps the Optional entirely. Malformed input (shouldn't happen —
+;; this always parses `$?`) just yields 0.
+fn parse_exit_code(s: string) -> int is
+    let t: string = string_trim(s)
+    let n: int = string_len(t)
+    let mut result: int = 0
+    let mut i: int = 0
+    while i < n is
+        let c: string = string_at(t, i)
+        if c >= "0" && c <= "9" is
+            let d: int = string_find("0123456789", c)
+            result = result * 10 + d
+        end
+        i += 1
+    end
+    return result
+end
+
+fn capture_with_status(cmd: string) -> (string, int) is
+    let tmp: string = "/tmp/bytes_ws_" + to_string(proc_id()) + "_" + to_string(time_ms()) + ".txt"
+    system("{ " + cmd + "; echo \"__BYTES_EXIT__:$?\"; } >" + tmp + " 2>&1")
+    let raw: string = file_read(tmp)
+    file_delete(tmp)
+    let marker: string = "__BYTES_EXIT__:"
+    let idx: int = string_rfind(raw, marker)
+    if idx < 0 is
+        ;; marker missing (shouldn't happen) — treat as failure so a
+        ;; broken capture is never silently reported as success
+        return (raw, 1)
+    end
+    let out: string = string_slice(raw, 0, idx)
+    let code_str: string = string_trim(string_slice(raw, idx + string_len(marker), string_len(raw)))
+    let code: int = parse_exit_code(code_str)
+    return (out, code)
 end
 
 fn find_hsh() -> string is
@@ -72,7 +143,7 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
     ;; many times below (error messages, the returned MemberStatus, …).
     let mut member_dir: string = name + ""
     if !dir_exists(name) is
-        let ws_root: string = getenv("BYTES_WORKSPACE_ROOT")
+        let ws_root: string = env_get("BYTES_WORKSPACE_ROOT")
         if ws_root != "" is
             let abs: string = ws_root + "/" + name
             if dir_exists(abs) is member_dir = abs end
@@ -83,7 +154,7 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
         return MemberStatus {
             name: name, lang: lang, success: false,
             output: "directory '" + name + "' not found",
-            elapsed: time_ms() - t0
+            elapsed: time_ms() - t0, bin_path: ""
         }
     end
 
@@ -95,17 +166,43 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
     let rel_flag: string = if release then " --release" else "" 
     let mut success: bool   = false
     let mut output:  string = ""
+    ;; EXPANSION: resolved output binary path for this member, when the
+    ;; branch below has one — see MemberStatus.bin_path's doc comment.
+    let mut bin_path: string = ""
+    ;; EXPANSION: label shown by the live spinner (progress::
+    ;; run_with_spinner) while this member's build command runs — see
+    ;; that function's doc comment for why a spinner instead of just
+    ;; blocking in silence like this used to.
+    let spin_label: string = name + " \x1b[2m(" + lang + ")\x1b[0m"
 
     match lang is
         "h#" | "hsharp" => is
-            ;; Read member Bytes.hk for entry/emit
+            ;; Read member Bytes.hk for entry/output/emit
             let member_hk: string = member_dir + "/Bytes.hk"
+            ;; BUG FIX: `config::build_entry(mp)` / `config::build_output(mp)`
+            ;; return the raw path as written in the member's OWN Bytes.hk
+            ;; (e.g. "src/main.h#"), which is relative to `member_dir` —
+            ;; NOT to the workspace root, which is where this process's
+            ;; CWD actually is when `system()`/`capture()` runs the
+            ;; compile command below. Previously this branch used that
+            ;; value as-is (unlike the `else` fallback a few lines down,
+            ;; which correctly prefixes `member_dir + "/src/main.h#"`),
+            ;; so any member with its own Bytes.hk failed with
+            ;; "cannot read `src/main.h#`: No such file or directory" —
+            ;; every path was being resolved against the workspace root
+            ;; instead of the member's own directory. Also fixes the
+            ;; matching bug where the compiled binary's name/location
+            ;; silently ignored the member's own `-> output =>` and was
+            ;; always hardcoded to `build/main`.
             let entry: string = if file_exists(member_hk) is
                 let mp: config::Project = config::load_path(member_hk)
-                config::build_entry(mp)
+                member_dir + "/" + config::build_entry(mp)
             else is member_dir + "/src/main.h#" end
 
-            let out: string = member_dir + "/build/main"
+            let out: string = if file_exists(member_hk) is
+                let mp: config::Project = config::load_path(member_hk)
+                member_dir + "/" + config::build_output(mp)
+            else is member_dir + "/build/main" end
             let hsh: string = find_hsh()
 
             ;; Check for --emit in member Bytes.hk
@@ -116,61 +213,89 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
             else ""
             end
 
-            let cmd: string = hsh + " compile " + entry + " -o " + out + rel_flag + emit_arg
-            output  = capture(cmd)
-            success = system(cmd + " >/dev/null 2>&1") == 0
+            ;; Extra `-I <dir>` for members that reuse another project's
+            ;; `.h#` modules via `-> include =>` in their own Bytes.hk
+            ;; (see BuildConfig.include's doc comment in config.h#) —
+            ;; this is what lets e.g. `isolated` resolve `mod config`
+            ;; straight into `../source-code/src/config.h#` without a
+            ;; physical copy of that file ever existing under `isolated/`.
+            let include_arg: string = if file_exists(member_hk) is
+                let mp: config::Project = config::load_path(member_hk)
+                let inc: string = mp.build.include
+                if inc != "" then " -I " + member_dir + "/" + inc else "" 
+            else ""
+            end
+
+            let cmd: string = hsh + " compile " + entry + " -o " + out + rel_flag + emit_arg + include_arg
+            let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+            output   = __cs.0
+            success  = __cs.1 == 0
+            bin_path = out
         end
         "rust" => is
             let cargo_f: string = if release then " --release" else "" 
             let manifest: string = member_dir + "/Cargo.toml"
             let cmd: string = "cargo build" + cargo_f + " --manifest-path " + manifest
-            output  = capture(cmd)
-            success = system(cmd + " >/dev/null 2>&1") == 0
+            let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+            output  = __cs.0
+            success = __cs.1 == 0
         end
         "c++" | "cpp" => is
             let out: string = member_dir + "/build/lib" + name + ".so"
             let opt: string = if release then " -O3 -flto" else " -O0 -g" 
             let cmd: string = "c++ -shared -fPIC -std=c++17 " + member_dir + "/src/*.cpp -o " + out + opt
-            output  = capture(cmd)
-            success = system(cmd + " >/dev/null 2>&1") == 0
+            let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+            output   = __cs.0
+            success  = __cs.1 == 0
+            bin_path = out
         end
         "c" => is
             let out: string = member_dir + "/build/lib" + name + ".so"
             let opt: string = if release then " -O2" else " -O0 -g" 
             let cmd: string = "cc -shared -fPIC " + member_dir + "/src/*.c -o " + out + opt
-            output  = capture(cmd)
-            success = system(cmd + " >/dev/null 2>&1") == 0
+            let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+            output   = __cs.0
+            success  = __cs.1 == 0
+            bin_path = out
         end
         "odin" => is
             let out: string = member_dir + "/build/main"
             let opt: string = if release then " -o:aggressive" else "" 
             let cmd: string = "odin build " + member_dir + "/src -out:" + out + opt
-            output  = capture(cmd)
-            success = system(cmd + " >/dev/null 2>&1") == 0
+            let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+            output   = __cs.0
+            success  = __cs.1 == 0
+            bin_path = out
         end
         "zig" => is
             let cmd: string = "zig build" + if release then " -Doptimize=ReleaseFast" else "" 
-            output  = capture("cd " + member_dir + " && " + cmd)
-            success = system("cd " + member_dir + " && " + cmd + " >/dev/null 2>&1") == 0
+            let __cs: (string, int) = progress::run_with_spinner("cd " + member_dir + " && " + cmd, spin_label)
+            output  = __cs.0
+            success = __cs.1 == 0
         end
         "crystal" => is
             let out: string = member_dir + "/build/main"
             let opt: string = if release then " --release" else "" 
             let cmd: string = "crystal build " + member_dir + "/src/main.cr -o " + out + opt
-            output  = capture(cmd)
-            success = system(cmd + " >/dev/null 2>&1") == 0
+            let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+            output   = __cs.0
+            success  = __cs.1 == 0
+            bin_path = out
         end
         "go" | "golang" => is
             let out: string = member_dir + "/build/main"
             let cmd: string = "go build -o " + out + " " + member_dir + "/..."
-            output  = capture(cmd)
-            success = system(cmd + " >/dev/null 2>&1") == 0
+            let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+            output   = __cs.0
+            success  = __cs.1 == 0
+            bin_path = out
         end
         "python" | "py" => is
             ;; Python: just syntax-check
             let cmd: string = "python3 -m py_compile " + member_dir + "/src/main.py"
-            output  = capture(cmd)
-            success = system(cmd + " >/dev/null 2>&1") == 0
+            let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+            output  = __cs.0
+            success = __cs.1 == 0
         end
         _ => is
             output  = "unknown language: " + lang
@@ -180,7 +305,7 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
 
     return MemberStatus {
         name: name, lang: lang, success: success,
-        output: output, elapsed: time_ms() - t0
+        output: output, elapsed: time_ms() - t0, bin_path: bin_path
     }
 end
 
@@ -188,7 +313,7 @@ end
 
 pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> int is
     ;; Set CWD to workspace root
-    let ws_root: string = getenv("BYTES_WORKSPACE_ROOT")
+    let ws_root: string = env_get("BYTES_WORKSPACE_ROOT")
     if ws_root != "" is
         system("cd " + ws_root)
     end
@@ -250,6 +375,16 @@ pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> i
     let mut passed: int = 0
     let mut failed: int = 0
     let mut results: [progress::MemberStatus] = []
+    ;; EXPANSION: overall "N/M members done" bar, pinned to the bottom of
+    ;; the terminal for the whole workspace build — see bar_clear's doc
+    ;; comment in progress.h# for exactly how "pinned" is achieved here
+    ;; (BUG FIX from the previous version of this loop: it called
+    ;; `write("")` right after every `bar_inc`, which sealed each frame
+    ;; as its own permanent line instead of letting the next `\r` redraw
+    ;; overwrite it — that's what produced a new static bar block after
+    ;; every single member instead of one bar updating in place).
+    let mut wsbar: progress::ProgressBar = progress::bar_new(order_n, "default", "workspace")
+    progress::bar_redraw(wsbar)
     i = 0
 
     while i < order_n is
@@ -267,18 +402,45 @@ pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> i
         end
 
         if skip is
+            progress::bar_clear()
             write("  \x1b[33m-\x1b[0m " + string_pad_right(member, 20) + " \x1b[2mskipped (no toolchain)\x1b[0m")
+            wsbar = progress::bar_inc(wsbar, 1)
             i += 1
             continue
         end
 
+        ;; Relinquish the pinned bottom line to build_member's own
+        ;; per-file spinner while it compiles (same row, same idea —
+        ;; only one "live" indicator owns that line at a time), then
+        ;; take it back once the member's result line has scrolled up.
+        progress::bar_clear()
         let res: progress::MemberStatus = build_member(member, lang, release, verbose)
         progress::print_member(res)
+        wsbar = progress::bar_inc(wsbar, 1)
 
         if res.success is passed += 1 else failed += 1 end
         results = array_push(results, res)
+
+        ;; EXPANSION: also collect this member's binary into one shared
+        ;; top-level `build/` directory at the workspace root — the
+        ;; Cargo-`target/{debug,release}/`-style single place every
+        ;; workspace binary ends up, instead of only under its own
+        ;; `<member>/build/...`  (which still exists too — this is a
+        ;; copy, not a move, so nothing that already depended on the
+        ;; per-member path breaks).
+        if res.success && res.bin_path != "" && file_exists(res.bin_path) is
+            let ws_build_dir: string = if ws_root != "" then ws_root + "/build" else "build" 
+            if !dir_exists(ws_build_dir) is dir_create(ws_build_dir) end
+            let collected: string = ws_build_dir + "/" + path_basename(res.bin_path)
+            system("cp -f " + sh_quote(res.bin_path) + " " + sh_quote(collected))
+        end
         i += 1
     end
+    ;; Final seal: erase the pinned bar one last time before the summary
+    ;; prints (write() doesn't clear a line on its own — without this the
+    ;; summary would be appended straight onto the end of the bar's
+    ;; unterminated last row instead of starting on a clean one).
+    progress::bar_clear()
 
     let elapsed: int = time_ms() - t_start
     progress::print_build_summary(passed, failed, elapsed)
