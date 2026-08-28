@@ -46,19 +46,37 @@ pub fn build_single(proj: config::Project, release: bool, verbose: bool) -> int 
     ;; `MemoryMode` fallback from bytes.hk, weaker than a function's own
     ;; `@mode` and weaker than its file's `@: mode` first line.
     let mem_arg:   string = if proj.build.mem_mode != "" then " --mem-mode " + proj.build.mem_mode else ""
+    ;; See BuildConfig.include's doc comment in config.h# — lets this
+    ;; project's `mod X` declarations resolve into another project's
+    ;; source tree (e.g. Isolator's `isolated/Bytes.hk` reusing
+    ;; `../source-code/src` directly) without physically duplicating
+    ;; files. Resolved relative to CWD, which for a standalone
+    ;; (non-workspace) `bytes build` is this project's own root.
+    let include_arg: string = if proj.build.include != "" then " -I " + proj.build.include else ""
 
-    let cmd: string = hsh + " compile " + entry + " -o " + out + emit_arg + flags + rel_flag + verb_flag + mem_arg
+    let cmd: string = hsh + " compile " + entry + " -o " + out + emit_arg + flags + rel_flag + verb_flag + mem_arg + include_arg
 
-    let t0:  int = time_ms()
-    let rc:  int = system(cmd)
+    let t0: int = time_ms()
+    ;; EXPANSION/BUG FIX: this used to be a plain `system(cmd)` — total
+    ;; silence for however long the compile takes, and on failure it ran
+    ;; the exact same command a *second* time (via `capture(cmd)`) just
+    ;; to retrieve the output that the first run's exit code alone
+    ;; didn't carry (the same double-run bug workspace.h#'s
+    ;; capture_with_status already had to fix — see its comment).
+    ;; progress::run_with_spinner shows a live spinner while the single
+    ;; blocking compile runs, and returns both the output and the exit
+    ;; code from that one run.
+    let spin_label: string = out
+    let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
+    let out_text: string = __cs.0
+    let rc:  int = __cs.1
     let ms:  int = time_ms() - t0
 
     if rc == 0 is
         write("  \x1b[32m✓\x1b[0m  " + out + "  \x1b[2m(" + progress::elapsed_str(ms) + ")\x1b[0m")
     else is
-        let err: string = capture(cmd)
         ;; Print first few error lines
-        let lines: [string] = string_split(err, "\n")
+        let lines: [string] = string_split(out_text, "\n")
         let n:     int      = array_len(lines)
         let mut i: int = 0
         while i < n && i < 12 is
