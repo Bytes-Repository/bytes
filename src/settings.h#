@@ -1,9 +1,5 @@
-extern dynamic [c] is
-    fn getenv(name: string) -> string
-end
-
 pub fn settings_dir() -> string is
-    let home:     string = getenv("HOME")
+    let home:     string = env_get("HOME")
     let home_dir: string = if home == "" then "." else home 
     return home_dir + "/.hackeros/H#"
 end
