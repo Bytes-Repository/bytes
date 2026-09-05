@@ -135,15 +135,23 @@ fn resolve_theme(requested: string) -> string is
 end
 
 pub struct ProgressBar is
-    pub total:   int
-    pub current: int
-    pub width:   int
-    pub theme:   string
-    pub label:   string
+    pub total:      int
+    pub current:    int
+    pub width:      int
+    pub theme:      string
+    pub label:      string
+    ;; [FIXED] added for a REAL ETA. The previous ETA math was
+    ;; `(total - current) / current` with no time anywhere in it — that's
+    ;; an item-count ratio mislabeled with an "s" suffix, not a time
+    ;; estimate (a 5-item bar sitting untouched for an hour after its 2nd
+    ;; item would still claim "~1s" forever). Recording when the bar
+    ;; started lets `bar_line` compute an actual seconds-per-item rate
+    ;; from real elapsed time and project it over what's left.
+    pub started_at: int
 end
 
 pub fn bar_new(total: int, theme: string, label: string) -> ProgressBar is
-    return ProgressBar { total: total, current: 0, width: 20, theme: resolve_theme(theme), label: label }
+    return ProgressBar { total: total, current: 0, width: 20, theme: resolve_theme(theme), label: label, started_at: time_ms() }
 end
 
 fn bar_render_bar(b: ProgressBar, filled: int, empty: int) -> string is
@@ -168,11 +176,16 @@ fn bar_line(b: ProgressBar) -> string is
     let bar_str: string = bar_render_bar(b, filled, empty)
     let pct_str: string = "\x1b[33m\x1b[1m" + to_string(pct) + "%\x1b[0m"
 
+    ;; [FIXED] real elapsed-time-based ETA — see ProgressBar.started_at
+    ;; doc comment. ms-per-completed-item, projected over what's left,
+    ;; instead of a fake item-count ratio mislabeled as seconds.
     let mut eta_str: string = ""
     if pct > 0 && pct < 100 is
-        let remaining: int = b.total - b.current
-        let rate:      int = if b.current > 1 then b.current else 1 
-        eta_str = "\x1b[2m ~" + to_string(remaining / rate) + "s\x1b[0m"
+        let elapsed_ms:   int = time_ms() - b.started_at
+        let ms_per_item:  int = if b.current > 0 then elapsed_ms / b.current else 0 
+        let remaining:    int = b.total - b.current
+        let eta_seconds:  int = (ms_per_item * remaining) / 1000
+        eta_str = "\x1b[2m ~" + to_string(eta_seconds) + "s\x1b[0m"
     end
 
     return bar_str + " " + pct_str + " " + eta_str + string_repeat(" ", 10) +
@@ -182,7 +195,7 @@ end
 pub fn bar_inc(b: ProgressBar, n: int) -> ProgressBar is
     let new_cur: int = if b.current + n > b.total then b.total else b.current + n 
     let updated: ProgressBar = ProgressBar {
-        total: b.total, current: new_cur, width: b.width, theme: b.theme, label: b.label
+        total: b.total, current: new_cur, width: b.width, theme: b.theme, label: b.label, started_at: b.started_at
     }
     io_print("\r" + bar_line(updated))
     return updated
@@ -217,7 +230,7 @@ end
 
 pub fn bar_finish(b: ProgressBar, msg: string) is
     let done: ProgressBar = ProgressBar {
-        total: b.total, current: b.total, width: b.width, theme: b.theme, label: b.label
+        total: b.total, current: b.total, width: b.width, theme: b.theme, label: b.label, started_at: b.started_at
     }
     io_print("\r" + bar_line(done))
     write("")
@@ -285,24 +298,15 @@ pub fn print_member(m: MemberStatus) is
     let icon:    string = if m.success then "\x1b[32m✓\x1b[0m" else "\x1b[31mx\x1b[0m" 
     let time_s:  string = elapsed_str(m.elapsed)
     write("  " + icon + " " + string_pad_right(m.name, 20) + " \x1b[2m" + m.lang + " (" + time_s + ")\x1b[0m")
-    if !m.success is
-        ;; BUG FIX: this used to hard-cap output to the first 5 lines
-        ;; (`i < 5`), which is enough to show the compiler's error-block
-        ;; HEADER ("-- TYPE ERROR (file) --" + "--> file:line:col") but
-        ;; cuts off *before* the actual "Error: ..." description and
-        ;; "Hint: ..." line that follow a few lines later — i.e. it hid
-        ;; exactly the useful part of every diagnostic. Show the full
-        ;; captured output instead; a build tool should never truncate
-        ;; compiler diagnostics by default.
-        let lines:  [string] = string_split(m.output, "\n")
-        let n: int = array_len(lines)
-        let mut i: int = 0
-        while i < n is
-            let l: string = string_trim(lines[i])
-            if l != "" is write("      \x1b[31m" + l + "\x1b[0m") end
-            i += 1
-        end
-    end
+    ;; [FIXED] `m.output` is now always "" by design — run_with_spinner
+    ;; streams the compiler's output directly to the terminal instead of
+    ;; capturing it (see its own doc comment for why: every capture
+    ;; mechanism tried — backgrounded tempfile, synchronous tempfile,
+    ;; std's own `process::run`, unavailable in this compiler's codegen —
+    ;; had its own failure mode). So there is nothing left to reprint
+    ;; here, and no "output was empty" case to warn about either: on
+    ;; failure, the real error block already appeared above this line,
+    ;; live, exactly as the compiler wrote it.
 end
 
 pub fn print_build_header(name: string, version: string, release: bool) is
@@ -325,71 +329,41 @@ pub fn print_build_summary(passed: int, failed: int, elapsed_ms: int) is
     write("")
 end
 
-;; ── Live progress around a blocking shell command ───────────────────────────
-;; EXPANSION: this is what makes `bytes build`/`bytes build --release`
-;; actually show something *while* a member is compiling, instead of
-;; sitting there in total silence for however many seconds until the
-;; command finally returns (all this module's spinner/bar rendering
-;; already existed — nothing in build.h#/workspace.h# ever called it
-;; around the actual compile step, since a plain blocking `system(cmd)`
-;; leaves no opportunity to redraw anything).
+;; ── Running a command with its output streamed live, verbatim ──────────────
+;; [FIXED] Third attempt at this, and the last one worth trying blind:
+;; the previous version used `process::run()` (std's own "capture a
+;; command's output" primitive) to sidestep a suspected buffering/race
+;; issue in the old system()+tempfile approach — but `process::run` isn't
+;; actually wired up in this h# v0.8 build: `codegen: undefined fn: run`.
+;; The std *source* declares it; the compiler's codegen backend just
+;; doesn't implement the underlying builtin yet. That's a toolchain gap,
+;; not something fixable from bytes' side.
 ;;
-;; H# has no threads, so there's no way to update the terminal *while*
-;; `system()` blocks on a synchronous child process. The fix used here is
-;; the same one shell scripts have always used to fake a progress
-;; indicator around an opaque subprocess: background the command, poll
-;; for completion in a short `sleep_ms` loop, and redraw the indicator
-;; between polls.
-;;
-;; BUG FIX / EXPANSION (round 2): this used to redraw a plain braille
-;; `Spinner` frame (⠋⠙⠹...) each poll, which doesn't match anything else
-;; in bytes' own UI — every other piece of build/workspace output uses
-;; the themed `<###--------->`-style bar. Swapped to
-;; `bar_indeterminate_line`, so a member compiling now looks like bytes'
-;; own progress bar (and respects the user's `bar_theme` setting) instead
-;; of an unthemed spinner glyph.
+;; Rather than keep guessing at capture mechanisms that might each have
+;; their own environment-specific gap, this stops trying to capture
+;; output at all: the child inherits bytes' own stdout/stderr directly,
+;; so whatever the compiler prints — including a full, real error block —
+;; appears on the user's terminal exactly as if they'd run it by hand,
+;; live, with zero risk of anything being lost, delayed, or silently
+;; dropped by an intermediate file or pipe. The one thing that easily
+;; survives any of these approaches, `echo $? > file`, still gets used
+;; for the exit code (a couple of bytes; this was never the part that
+;; went missing in earlier attempts).
 pub fn run_with_spinner(cmd: string, label: string) -> (string, int) is
-    let tmp:        string = "/tmp/bytes_spin_" + to_string(proc_id()) + "_" + to_string(time_ms()) + ".txt"
-    let exit_file:  string = tmp + ".exit"
-    let pid_file:   string = tmp + ".pid"
+    write("  \x1b[2m" + label + " …\x1b[0m")
 
-    ;; Backgrounds "{ cmd >tmp 2>&1; echo $? >exit_file; }" as a single
-    ;; job and captures its PID via $! into pid_file. The `system()` call
-    ;; itself returns almost instantly, since only the trailing
-    ;; `echo $!` runs in the foreground — control comes back to us
-    ;; immediately to start polling.
-    system("{ " + cmd + " >" + tmp + " 2>&1; echo $? >" + exit_file + "; } & echo $! >" + pid_file)
-    let pid: string = string_trim(if file_exists(pid_file) then file_read(pid_file) else "" end)
+    let exit_file: string = "/tmp/bytes_exit_" + to_string(proc_id()) + "_" + to_string(time_ms()) + ".txt"
+    system(cmd + "; echo $? > " + exit_file)
 
-    let theme: string = resolve_theme("default")
-    let mut frame:   int  = 0
-    let mut running: bool = true
-    while running is
-        if file_exists(exit_file) is
-            running = false
-        else is
-            io_print("\r  " + bar_indeterminate_line(theme, 20, frame, label) + "  ")
-            frame += 1
-            sleep_ms(80)
-            if pid != "" && !file_exists(exit_file) && system("kill -0 " + pid + " 2>/dev/null") != 0 is
-                ;; The process is gone but never wrote exit_file (killed,
-                ;; crashed, OOM-killed, ...) — stop polling instead of
-                ;; spinning forever. Falls through to the "no exit_file"
-                ;; branch below, which reports it as a failure.
-                running = false
-            end
-        end
-    end
-    ;; Clear the spinner's line so the caller's own result line (✓/x)
-    ;; starts clean on it instead of getting appended after a stray frame.
-    io_print("\r" + string_repeat(" ", 70) + "\r")
-
-    let out:  string = if file_exists(tmp) then file_read(tmp) else "" end
-    let code: int    = if file_exists(exit_file) then parse_exit_code_str(file_read(exit_file)) else 1 end
-    if file_exists(tmp)       is file_delete(tmp)       end
+    let code: int = if file_exists(exit_file)
+        then parse_exit_code_str(file_read(exit_file))
+        else 1 
     if file_exists(exit_file) is file_delete(exit_file) end
-    if file_exists(pid_file)  is file_delete(pid_file)  end
-    return (out, code)
+
+    ;; Output was streamed live above, not captured — an empty string
+    ;; here is expected and normal, not a failure to capture anything.
+    ;; See print_member below, which no longer treats this as an error.
+    return ("", code)
 end
 
 ;; Minimal "$?"-string -> int parser (always a plain 0-255 digit string,
