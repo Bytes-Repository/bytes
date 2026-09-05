@@ -10,7 +10,8 @@ pub struct JitCache is
 end
 
 pub fn jit_cache_new(proj: config::Project) -> JitCache is
-    let cache: string = proj.build.cache_dir
+    ;; [FIXED] see config.h#'s build_cache_dir doc comment.
+    let cache: string = config::build_cache_dir(proj)
     if !dir_exists(cache) is dir_create(cache) end
     return JitCache { dir: cache, enabled: true }
 end
