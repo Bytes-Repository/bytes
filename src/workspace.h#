@@ -136,6 +136,13 @@ end
 pub fn build_member(name: string, lang: string, release: bool, verbose: bool) -> progress::MemberStatus is
     let t0: int = time_ms()
 
+    ;; [FIXED] `verbose` was accepted by this function but never actually
+    ;; read anywhere in its body — `bytes build --release --verbose`
+    ;; produced byte-for-byte identical output to `bytes build --release`.
+    if verbose is
+        write("  \x1b[2m» building member '" + name + "' (" + lang + ")\x1b[0m")
+    end
+
     ;; Canonicalize member dir — try CWD first, then BYTES_WORKSPACE_ROOT
     ;; NOTE: `name + ""` (not a bare `let x: string = name`) on purpose —
     ;; a plain identifier RHS registers as a *move* of `name` under
@@ -227,6 +234,9 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
             end
 
             let cmd: string = hsh + " compile " + entry + " -o " + out + rel_flag + emit_arg + include_arg
+            ;; [FIXED] see `verbose` doc comment above — now actually
+            ;; shows the exact command being run when requested.
+            if verbose is write("  \x1b[2m$ " + cmd + "\x1b[0m") end
             let __cs: (string, int) = progress::run_with_spinner(cmd, spin_label)
             output   = __cs.0
             success  = __cs.1 == 0
@@ -318,14 +328,17 @@ pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> i
         system("cd " + ws_root)
     end
 
-    let ws: config::WorkspaceConfig = proj.workspace
     let members: [string] = config::ws_members(proj)
     let n: int = array_len(members)
 
+    ;; [FIXED] see config.h#'s ws_build_order doc comment — no more
+    ;; direct `ws.build_order` chain (was silently reading garbage).
+    let raw_build_order: string = config::ws_build_order(proj)
+
     ;; Determine build order
-    let order: [string] = if ws.build_order != "" is
+    let order: [string] = if raw_build_order != "" is
         let raw: string = string_replace(string_replace(
-            string_replace(ws.build_order, "[", ""), "]", ""), "\"", "")
+            string_replace(raw_build_order, "[", ""), "]", ""), "\"", "")
         let parts: [string] = string_split(raw, ",")
         let pn: int = array_len(parts)
         let mut result: [string] = []
@@ -367,7 +380,11 @@ pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> i
         i += 1
     end
 
-    progress::print_build_header(ws.name, ws.version, release)
+    ;; [FIXED] see config.h#'s ws_name/ws_version doc comment — was
+    ;; `ws.name`/`ws.version` (raw chain off a WorkspaceConfig local),
+    ;; which the compiler resolves ambiguously and which was observed to
+    ;; print the workspace's *mode* in place of its *version*.
+    progress::print_build_header(config::ws_name(proj), config::ws_version(proj), release)
     write("  \x1b[2m── Workspace build (" + to_string(order_n) + " member(s)) ───────────────────\x1b[0m")
     write("")
 
