@@ -275,6 +275,50 @@ pub fn build_lang(proj: Project) -> string is
     return "h#"
 end
 
+;; [FIXED] `workspace.h#` used to read `ws.name`, `ws.version` and
+;; `ws.build_order` directly off a `let ws: WorkspaceConfig = proj.workspace`
+;; local — a cross-module nested-field chain. The h# v0.8 compiler warns
+;; "cannot statically determine the struct type of `.name`/`.version`/
+;; `.build_order` — guessing by scanning all structs for a matching field
+;; name" for exactly this pattern, because `PackageConfig`, `WorkspaceConfig`
+;; and `BuildConfig` all have fields with the same names (`name`, `version`,
+;; `build_order`). At runtime the guess picks the wrong struct's field
+;; layout, so `ws.version` was silently reading back `ws.mode`'s value
+;; instead (reproduced live: `bytes build` printed "hco-workspace
+;; vstandard" instead of "hco-workspace v0.4.0" — "standard" is the
+;; *mode*, not the version). Every other nested-field read in this file
+;; (`build_entry`, `build_output`, `ws_members`, `pkg_name`, ...) already
+;; goes through a same-module accessor function instead of a raw chain,
+;; and those never triggered the warning — so the fix is to give
+;; `WorkspaceConfig`'s fields the same treatment instead of reading them
+;; directly from other modules.
+pub fn ws_name(proj: Project) -> string is
+    return proj.workspace.name
+end
+
+pub fn ws_version(proj: Project) -> string is
+    return proj.workspace.version
+end
+
+pub fn ws_mode(proj: Project) -> string is
+    return proj.workspace.mode
+end
+
+pub fn ws_build_order(proj: Project) -> string is
+    return proj.workspace.build_order
+end
+
+;; [FIXED] `jit.h#`'s `jit_cache_new` used to read `proj.build.cache_dir`
+;; directly — the same cross-module ambiguous-chain issue as
+;; `ws_name`/`ws_version` above (`.build` and `.cache_dir` both flagged
+;; by the compiler: "cannot statically determine the struct type of
+;; `.build`/`.cache_dir` — guessing by scanning all structs"). Added
+;; here for the same reason: a same-module accessor resolves correctly.
+pub fn build_cache_dir(proj: Project) -> string is
+    if proj.build.cache_dir != "" is return proj.build.cache_dir end
+    return "build/cache"
+end
+
 pub fn ws_members(proj: Project) -> [string] is
     let raw: string = string_replace(string_replace(
         string_replace(proj.workspace.members, "[", ""), "]", ""), "\"", "")
