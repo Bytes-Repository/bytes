@@ -19,7 +19,10 @@ fn collect_hsharp_files(extra: [string], extra_count: int) -> [string] is
     system("find . -name '*.h#' ! -path './build/*' ! -path './build/cache/*' | sort > " + tmp + " 2>/dev/null")
     let content: string = file_read(tmp)
     file_delete(tmp)
-    if content == "" is return [] end
+    if content == "" is
+        let empty: [string] = []
+        return empty
+    end
     let lines:   [string] = string_split(content, "\n")
     let n:       int = array_len(lines)
     let mut result: [string] = []
