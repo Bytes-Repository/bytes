@@ -58,6 +58,13 @@ pub struct Project is
     pub dep_count:     int
     pub has_workspace: bool
     pub root_path:     string
+    ;; Hard [deps] validation failures collected during `parse` (e.g. a
+    ;; bare `-> name => git` with no actual repo). Kept on the struct
+    ;; instead of failing inside `parse` itself so `parse` stays a pure
+    ;; function; `load`/`load_path` are what turn these into the
+    ;; `error:` + exit(1) every other missing/broken-project case already
+    ;; uses.
+    pub errors:        [string]
 end
 
 pub fn default_project() -> Project is
@@ -78,6 +85,7 @@ pub fn default_project() -> Project is
         },
         deps: [], dep_count: 0,
         has_workspace: false, root_path: ".",
+        errors: [],
     }
 end
 
@@ -96,6 +104,45 @@ pub fn hk_parse_value(line: string) -> string is
     let cut:   int = if bang >= 0 && (semi < 0 || bang < semi) then bang
                      else if semi >= 0 then semi else -1  
     return if cut >= 0 then hk_trim(string_slice(v, 0, cut)) else v 
+end
+
+;; ── [deps] value classification ─────────────────────────────────────────────
+;;
+;; A `-> name => <value>` line's `<value>` can be:
+;;   - "dynamic" / "static"      → link against a system library
+;;   - a real git URL            → clone that repo (kind "git")
+;;   - "vX[.Y[.Z]]" (e.g. "v0.2") → pin to that exact published version
+;;     (kind "version"; resolved from the Bytes registry + a matching git
+;;     tag — see installer.h#'s `install_bytes_dep_pinned`)
+;;   - "newest" (case-insensitive) → always take the latest revision and
+;;     build it from source instead of trusting whatever is cached
+;;     (kind "newest" — see `install_bytes_dep_newest`)
+;;   - anything else / empty     → plain bytes-registry lookup by name
+;;     (kind "bytes", unchanged default behaviour)
+;;
+;; The bare word "git" with nothing else (`-> lib => git`) used to also
+;; fall into the "git" bucket via `starts_with(val, "git")` below, and
+;; `install_git_dep` would then try `git clone --depth=1 'git' ...` —
+;; silently doomed to fail, since "git" names no repository at all. That
+;; is never what's meant: a real git dependency needs an actual URL
+;; (`https://...`, `git://...`, or `git@host:owner/repo.git`, all of
+;; which still match `starts_with(val, "git")` further down and are
+;; unaffected). So the exact literal "git" is now rejected up front as a
+;; hard [deps] error rather than an install-time warning.
+fn is_bare_git_literal(val: string) -> bool is
+    return string_lower(hk_trim(val)) == "git"
+end
+
+fn is_newest_spec(val: string) -> bool is
+    return string_lower(hk_trim(val)) == "newest"
+end
+
+;; "v" followed by at least one digit, e.g. "v0", "v0.2", "v1.4.10".
+fn is_version_spec(val: string) -> bool is
+    let v: string = hk_trim(val)
+    if string_len(v) < 2 || string_at(v, 0) != "v" is return false end
+    let c: string = string_at(v, 1)
+    return c >= "0" && c <= "9"
 end
 
 pub fn hk_parse_key(line: string) -> string is
@@ -188,12 +235,24 @@ pub fn parse(content: string) -> Project is
                 end
             end
             "deps" => is
-                let kind: string = if val == "dynamic" || val == "static" then val
-                                   else if string_starts_with(val, "git") then "git"
-                                   else if string_starts_with(val, "http") then "git"
-                                   else "bytes"
-                proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: kind, source: val })
-                proj.dep_count += 1
+                if is_bare_git_literal(val) is
+                    proj.errors = array_push(proj.errors,
+                        "[deps] '" + key + " => git' is not a valid source — " +
+                        "'git' alone doesn't name a repository. Use a full URL " +
+                        "(e.g. 'https://github.com/owner/" + key + ".git') or " +
+                        "'git@host:owner/" + key + ".git' instead.")
+                    proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: "invalid", source: val })
+                    proj.dep_count += 1
+                else is
+                    let kind: string = if val == "dynamic" || val == "static" then val
+                                       else if is_newest_spec(val) then "newest"
+                                       else if is_version_spec(val) then "version"
+                                       else if string_starts_with(val, "git") then "git"
+                                       else if string_starts_with(val, "http") then "git"
+                                       else "bytes"
+                    proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: kind, source: val })
+                    proj.dep_count += 1
+                end
             end
             _ => is end
         end
@@ -235,6 +294,21 @@ pub fn find_hk_upward() -> string is
     return ""
 end
 
+;; Prints every collected [deps] validation error and exits(1) if there
+;; are any — shared by `load` and `load_path` so both entry points give
+;; the same hard failure instead of silently limping on with a broken
+;; dependency (see `is_bare_git_literal` above for why "git" alone is
+;; now one of these).
+fn fail_on_errors(proj: Project) is
+    if array_len(proj.errors) == 0 is return end
+    let mut i: int = 0
+    while i < array_len(proj.errors) is
+        write("  \x1b[31merror:\x1b[0m " + proj.errors[i])
+        i += 1
+    end
+    exit(1)
+end
+
 pub fn load() -> Project is
     let path: string = find_hk()
     if path == "" is
@@ -244,6 +318,7 @@ pub fn load() -> Project is
     end
     let mut proj: Project = parse(file_read(path))
     proj.root_path = "."
+    fail_on_errors(proj)
     return proj
 end
 
@@ -251,6 +326,7 @@ pub fn load_path(path: string) -> Project is
     let mut proj: Project = parse(file_read(path))
     let slash: int = string_rfind(path, "/")
     proj.root_path = if slash >= 0 then string_slice(path, 0, slash) else "." 
+    fail_on_errors(proj)
     return proj
 end
 
