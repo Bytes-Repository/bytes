@@ -349,6 +349,9 @@ fn cmd_list() is
             "dynamic" => "\x1b[36mdynamic\x1b[0m"
             "static"  => "\x1b[33mstatic\x1b[0m"
             "git"     => "\x1b[35mgit\x1b[0m"
+            "version" => "\x1b[34m" + dep.source + "\x1b[0m"
+            "newest"  => "\x1b[92mnewest\x1b[0m"
+            "invalid" => "\x1b[31minvalid\x1b[0m"
             _         => "\x1b[32mbytes\x1b[0m"
         end
         write("  " + string_pad_right(dep.name, 24) + " " + kind_col +
