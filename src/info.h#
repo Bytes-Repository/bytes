@@ -37,12 +37,12 @@ pub fn cmd_info_project() -> int is
         write("")
     end
 
-    if proj.dep_count > 0 is
-        write("  \x1b[2mDependencies (" + to_string(proj.dep_count) + ")\x1b[0m")
+    if config::dep_count(proj) > 0 is
+        write("  \x1b[2mDependencies (" + to_string(config::dep_count(proj)) + ")\x1b[0m")
         let mut i: int = 0
-        while i < proj.dep_count is
-            let d: config::DepEntry = proj.deps[i]
-            write("    " + string_pad_right(d.name, 20) + "  [" + d.kind + "]  " + d.source)
+        while i < config::dep_count(proj) is
+            let d: config::DepEntry = config::dep_at(proj, i)
+            write("    " + string_pad_right(config::dep_name(d), 20) + "  [" + config::dep_kind(d) + "]  " + config::dep_source(d))
             i += 1
         end
         write("")
