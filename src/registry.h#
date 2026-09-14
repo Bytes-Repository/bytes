@@ -13,6 +13,16 @@ pub struct Registry is
     pub count:    int
 end
 
+;; [FIXED] Callers outside this module (installer.h#'s `install_bytes_dep`,
+;; cli.h#'s `cmd_info_pkg`) used to read `entry.name`/`entry.git` directly
+;; off a `let entry: registry::RegEntry = registry_find(...)` local — the
+;; same cross-module ambiguous-field issue documented in config.h#'s
+;; `ws_name` fix (flagged here for `.name` and `.git`, since `DepEntry`
+;; and `LockedPkg` also have a `.name`). Same fix: a same-module accessor.
+pub fn reg_name(e: RegEntry) -> string is return e.name end
+pub fn reg_git(e: RegEntry)  -> string is return e.git  end
+pub fn reg_version(e: RegEntry) -> string is return e.version end
+
 fn index_url() -> string is
     return "https://raw.githubusercontent.com/Bytes-Repository/repository/main/index.json"
 end
