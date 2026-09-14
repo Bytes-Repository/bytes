@@ -33,7 +33,7 @@ pub fn build_single(proj: config::Project, release: bool, verbose: bool) -> int 
     if !dir_exists("build/cache") is dir_create("build/cache") end
 
     ;; Install deps
-    if proj.dep_count > 0 is
+    if config::dep_count(proj) > 0 is
         installer::install_all(proj, release, verbose)
     end
 
