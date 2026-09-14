@@ -435,7 +435,7 @@ pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> i
         progress::print_member(res)
         wsbar = progress::bar_inc(wsbar, 1)
 
-        if res.success is passed += 1 else failed += 1 end
+        if progress::member_success(res) is passed += 1 else failed += 1 end
         results = array_push(results, res)
 
         ;; EXPANSION: also collect this member's binary into one shared
@@ -445,11 +445,12 @@ pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> i
         ;; `<member>/build/...`  (which still exists too — this is a
         ;; copy, not a move, so nothing that already depended on the
         ;; per-member path breaks).
-        if res.success && res.bin_path != "" && file_exists(res.bin_path) is
+        let res_bin_path: string = progress::member_bin_path(res)
+        if progress::member_success(res) && res_bin_path != "" && file_exists(res_bin_path) is
             let ws_build_dir: string = if ws_root != "" then ws_root + "/build" else "build" 
             if !dir_exists(ws_build_dir) is dir_create(ws_build_dir) end
-            let collected: string = ws_build_dir + "/" + path_basename(res.bin_path)
-            system("cp -f " + sh_quote(res.bin_path) + " " + sh_quote(collected))
+            let collected: string = ws_build_dir + "/" + path_basename(res_bin_path)
+            system("cp -f " + sh_quote(res_bin_path) + " " + sh_quote(collected))
         end
         i += 1
     end
