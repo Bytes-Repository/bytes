@@ -237,6 +237,105 @@ pub fn bar_finish(b: ProgressBar, msg: string) is
     write("  \x1b[32m\x1b[1m✓\x1b[0m \x1b[1m" + msg + "\x1b[0m")
 end
 
+;; ── Pinned multi-line status block (Cargo-style, animated) ─────────────────
+;; What the single-line `bar_inc`/`bar_clear`/`bar_redraw` trio above still
+;; can't do on its own: a real, always-in-place block like Cargo's
+;;
+;;   Fetching   hprompt
+;;   [=====>          ]  32%  ~2s
+;;   cloning from git…
+;;
+;; three fixed rows that redraw over themselves every tick, with any real
+;; log line (a warning, a "cached" note) printed as a genuine, permanent
+;; line ABOVE the block, which then reappears right below it — never
+;; interleaved character-by-character with the animation the way a plain
+;; `write()` next to a `\r`-redrawing bar_inc used to (see `install_hsharp_deps`,
+;; which is what actually drove this). The trick is the same "erase, then
+;; reprint" `bar_clear`/`bar_redraw` already use for one line, just done
+;; for three: `\x1b[2A` moves the cursor up two rows (back to row 1 of the
+;; block) and `\r\x1b[0K` at the start of every row clears it left-to-right
+;; before the new content goes down, so leftover text from a longer
+;; previous frame never lingers.
+pub struct MultiBar is
+    pub bar:    ProgressBar
+    pub status: string   ;; e.g. "Fetching" / "Installing"
+    pub action: string   ;; current sub-step shown on row 3, e.g. "hprompt (cloning…)"
+    pub drawn:  bool     ;; has row 1 already been printed at least once?
+end
+
+pub fn multibar_new(total: int, theme: string, label: string, status: string) -> MultiBar is
+    return MultiBar { bar: bar_new(total, theme, label), status: status, action: "…", drawn: false }
+end
+
+fn multibar_row1(m: MultiBar) -> string is
+    return "  \x1b[1m" + m.status + "\x1b[0m \x1b[36m" + m.bar.label + "\x1b[0m"
+end
+
+fn multibar_row2(m: MultiBar) -> string is
+    return "  " + bar_line(m.bar)
+end
+
+fn multibar_row3(m: MultiBar) -> string is
+    return "  \x1b[2m└ " + m.action + "\x1b[0m"
+end
+
+;; Clears+reprints all three rows starting from wherever the cursor
+;; currently sits (does NOT jump up first) — used both by the normal
+;; redraw (after jumping up) and by `multibar_log` (which is already
+;; sitting at the right row after inserting its permanent line).
+fn multibar_paint(m: MultiBar) is
+    io_print("\r\x1b[0K" + multibar_row1(m) + "\n")
+    io_print("\r\x1b[0K" + multibar_row2(m) + "\n")
+    io_print("\r\x1b[0K" + multibar_row3(m))
+end
+
+pub fn multibar_draw(m: MultiBar) -> MultiBar is
+    if m.drawn is io_print("\x1b[2A") end
+    multibar_paint(m)
+    return MultiBar { bar: m.bar, status: m.status, action: m.action, drawn: true }
+end
+
+;; Advances the bar by `n` and redraws in place — the three-line
+;; equivalent of `bar_inc`.
+pub fn multibar_inc(m: MultiBar, n: int) -> MultiBar is
+    let new_cur: int = if m.bar.current + n > m.bar.total then m.bar.total else m.bar.current + n 
+    let new_bar: ProgressBar = ProgressBar {
+        total: m.bar.total, current: new_cur, width: m.bar.width,
+        theme: m.bar.theme, label: m.bar.label, started_at: m.bar.started_at
+    }
+    return multibar_draw(MultiBar { bar: new_bar, status: m.status, action: m.action, drawn: m.drawn })
+end
+
+;; Changes row 3's "what's happening right now" text without touching
+;; progress — e.g. switching from "checking cache…" to "cloning…" for the
+;; same package, before that package's `bar_inc` fires.
+pub fn multibar_set_action(m: MultiBar, action: string) -> MultiBar is
+    return multibar_draw(MultiBar { bar: m.bar, status: m.status, action: action, drawn: m.drawn })
+end
+
+;; Prints a REAL, permanent line (a warning, a "(cached)" note) directly
+;; above the block, then puts the (unchanged) block right back underneath
+;; it. Unlike a bare `write()` next to a `\r`-redrawing bar, this never
+;; leaves stray bar fragments in the log: the block's three rows are
+;; fully erased first, the real line lands where row 1 used to be, and
+;; the block is repainted fresh on the two now-blank rows below it.
+pub fn multibar_log(m: MultiBar, line: string) is
+    if m.drawn is
+        io_print("\x1b[2A\r\x1b[0K\n\x1b[0K\n\x1b[0K\x1b[2A")
+    end
+    write(line)
+    multibar_paint(m)
+end
+
+;; Erases the block and leaves a single, permanent "✓ done" summary line
+;; in its place — the three-line equivalent of `bar_finish`.
+pub fn multibar_finish(m: MultiBar, msg: string) is
+    if m.drawn is
+        io_print("\x1b[2A\r\x1b[0K\n\x1b[0K\n\x1b[0K\x1b[2A")
+    end
+    write("  \x1b[32m\x1b[1m✓\x1b[0m \x1b[1m" + msg + "\x1b[0m")
+end
+
 ;; ── Indeterminate bar ────────────────────────────────────────────────────────
 ;; EXPANSION: renders one frame of a "we don't know %, but here's motion"
 ;; bar in bytes' own theme (open/close/fill/empty chars from the same
@@ -293,6 +392,18 @@ pub struct MemberStatus is
     ;; Cargo-`target/`-style — see that call site's comment.
     pub bin_path: string
 end
+
+;; [FIXED] `workspace.h#`'s `build_workspace` used to read `res.success`
+;; and `res.bin_path` directly off a `let res: progress::MemberStatus =
+;; build_member(...)` local — a cross-module field read, which the h#
+;; v0.8 compiler always resolves by "guessing by scanning all structs
+;; for a matching field name" rather than from the (perfectly known)
+;; declared type, whenever the struct's definition lives in another
+;; module — see config.h#'s `ws_name`/`ws_version` fix comment for the
+;; full story (and the runtime bug that pattern silently caused there).
+;; Same fix here: a same-module accessor resolves correctly.
+pub fn member_success(m: MemberStatus)  -> bool   is return m.success  end
+pub fn member_bin_path(m: MemberStatus) -> string is return m.bin_path end
 
 pub fn print_member(m: MemberStatus) is
     let icon:    string = if m.success then "\x1b[32m✓\x1b[0m" else "\x1b[31mx\x1b[0m" 
