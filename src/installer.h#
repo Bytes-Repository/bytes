@@ -17,148 +17,232 @@ pub fn install_all(proj: config::Project, release: bool, verbose: bool) -> bool 
 end
 
 ;; ── H# zależności ─────────────────────────────────────────────────────────────
+;;
+;; [FIXED] Every `install_*` helper below used to call `write(...)`
+;; directly for its "(cached)"/"(git cached)"/"not in registry" notes.
+;; That's exactly what broke the pinned bar: a plain `write()` ends in a
+;; real newline, which permanently seals whatever the bar's last `\r`
+;; redraw had put on that row — see progress.h#'s `MultiBar` doc comment.
+;; So instead of logging directly, each helper now RETURNS the note
+;; (empty when there's nothing to say), and this loop is the only place
+;; that ever prints one — always through `progress::multibar_log`, which
+;; erases the pinned block first, prints the note as a real permanent
+;; line, then redraws the block underneath it. Net effect: one single
+;; "Fetching hprompt / [====>    ] 45% ~1s / cloning from git…" block
+;; that stays pinned to the bottom the whole time `bytes build` or
+;; `bytes install` runs — exactly like Cargo — with every real log line
+;; scrolling normally above it instead of stomping on it.
+;;
+;; [FIXED] Each helper's result used to be a plain `(bool, string)`
+;; tuple. That tripped the h# v0.8 compiler's ownership checker: reading
+;; `.0` off a tuple that contains a non-Copy field (the `string`) moves
+;; the WHOLE tuple, so a later `.1` read on the same local was flagged
+;; "used here after being moved". Structs don't have this problem
+;; anywhere else in this codebase (e.g. `ProgressBar`'s fields are read
+;; repeatedly with no such warning), so the fix is a tiny result struct
+;; instead of a tuple — `InstallOutcome` below.
+struct InstallOutcome is
+    pub ok:   bool
+    pub note: string
+end
 
 fn install_hsharp_deps(proj: config::Project, verbose: bool) -> bool is
-    if proj.dep_count == 0 is return true end
+    let total: int = config::dep_count(proj)
+    if total == 0 is return true end
 
     if !dir_exists(pkg_cache_dir()) is dir_create(pkg_cache_dir()) end
 
-    write("  \x1b[2mFetching " + to_string(proj.dep_count) + " dependency(ies)...\x1b[0m")
-
     let mut lf:     lockfile::LockFile = lockfile::lockfile_read()
-    let mut bar:    progress::ProgressBar = progress::bar_new(proj.dep_count, "default", "deps")
+    let mut mb:     progress::MultiBar = progress::multibar_new(total, "default", "deps", "Fetching")
     let mut failed: int  = 0
     let mut i:      int  = 0
 
-    while i < proj.dep_count is
-        let dep: config::DepEntry = proj.deps[i]
+    mb = progress::multibar_set_action(mb, to_string(total) + " dependency(ies)…")
 
-        ;; Check cache first
-        let cached_path: string = pkg_cache_dir() + "/" + dep.name
-        let locked: lockfile::LockedPkg = lockfile::lockfile_get(lf, dep.name)
+    while i < total is
+        let dep:      config::DepEntry = config::dep_at(proj, i)
+        let dep_name: string = config::dep_name(dep)
+        let dep_kind: string = config::dep_kind(dep)
+        let dep_src:  string = config::dep_source(dep)
 
-        if locked.name != "" && dir_exists(cached_path) is
-            if verbose is write("  \x1b[2m" + dep.name + " (cached)\x1b[0m") end
-            bar = progress::bar_inc(bar, 1)
+        ;; Check cache first — a `path` dep is the one exception: it's
+        ;; meant to always track the local source live (see
+        ;; `install_path_dep`), so it re-links every time rather than
+        ;; trusting a stale lockfile entry.
+        let cached_path: string = pkg_cache_dir() + "/" + dep_name
+        let locked: lockfile::LockedPkg = lockfile::lockfile_get(lf, dep_name)
+
+        if lockfile::locked_name(locked) != "" && dir_exists(cached_path) && dep_kind != "path" is
+            mb = progress::multibar_set_action(mb, dep_name + " (cached)")
+            if verbose is progress::multibar_log(mb, "  \x1b[2m" + dep_name + " (cached)\x1b[0m") end
+            mb = progress::multibar_inc(mb, 1)
             i += 1
             continue
         end
 
-        ;; Fetch from registry or git
-        let ok: bool = match dep.kind is
-            "git" => is install_git_dep(dep.name, dep.source, cached_path, verbose) end
-            "bytes" => is install_bytes_dep(dep.name, cached_path, verbose) end
-            "version" => is install_bytes_dep_pinned(dep.name, dep.source, cached_path, verbose) end
-            "newest" => is install_bytes_dep_newest(dep.name, cached_path, verbose) end
+        mb = progress::multibar_set_action(mb, dep_name + match dep_kind is
+            "git"                 => " (cloning…)"
+            "path"                => " (linking local path…)"
+            "version"             => " (fetching " + dep_src + "…)"
+            "newest"              => " (syncing to newest…)"
+            "dynamic" | "static"  => " (checking system lib…)"
+            _                     => " (registry lookup…)"
+        end)
+
+        ;; Fetch from registry, git, or the local filesystem
+        let result: InstallOutcome = match dep_kind is
+            "git" => is install_git_dep(dep_name, dep_src, cached_path, verbose) end
+            "path" => is install_path_dep(dep_name, dep_src, cached_path, verbose) end
+            "bytes" => is install_bytes_dep(dep_name, cached_path, verbose) end
+            "version" => is install_bytes_dep_pinned(dep_name, dep_src, cached_path, verbose) end
+            "newest" => is install_bytes_dep_newest(dep_name, cached_path, verbose) end
             "dynamic" | "static" => is
                 ;; System library — verify with pkg-config, no download needed
-                if verbose is write("  \x1b[2m" + dep.name + " (system lib)\x1b[0m") end
-                true
+                InstallOutcome { ok: true, note: if verbose then "  \x1b[2m" + dep_name + " (system lib)\x1b[0m" else "" }
             end
             _ => is
-                if verbose is write("  \x1b[2m" + dep.name + " (unknown kind " + dep.kind + ")\x1b[0m") end
-                true
+                InstallOutcome { ok: true, note: if verbose then "  \x1b[2m" + dep_name + " (unknown kind " + dep_kind + ")\x1b[0m" else "" }
             end
         end
 
-        if ok is
-            lf = lockfile::lockfile_lock(lf, dep.name, dep.source, dep.source, "")
+        if result.note != "" is progress::multibar_log(mb, result.note) end
+
+        if result.ok is
+            lf = lockfile::lockfile_lock(lf, dep_name, dep_src, dep_src, "")
         else is
-            write("  \x1b[33mwarn:\x1b[0m  failed to fetch " + dep.name)
+            progress::multibar_log(mb, "  \x1b[33mwarn:\x1b[0m  failed to fetch " + dep_name)
             failed += 1
         end
 
-        bar = progress::bar_inc(bar, 1)
+        mb = progress::multibar_inc(mb, 1)
         i += 1
     end
 
     lockfile::lockfile_write(lf)
-    progress::bar_finish(bar, to_string(proj.dep_count - failed) + " package(s) ready")
+    progress::multibar_finish(mb, to_string(total - failed) + " package(s) ready")
 
     return failed == 0
 end
 
-fn install_git_dep(name: string, url: string, target: string, verbose: bool) -> bool is
+fn install_git_dep(name: string, url: string, target: string, verbose: bool) -> InstallOutcome is
     if dir_exists(target) is
-        if verbose is write("  \x1b[2m" + name + " (git cached)\x1b[0m") end
-        return true
+        return InstallOutcome { ok: true, note: if verbose then "  \x1b[2m" + name + " (git cached)\x1b[0m" else "" }
     end
     let cmd: string = "git clone --depth=1 '" + url + "' '" + target + "' 2>/dev/null"
-    if verbose is write("  \x1b[2m$ " + cmd + "\x1b[0m") end
-    return system(cmd) == 0
+    let note: string = if verbose then "  \x1b[2m$ " + cmd + "\x1b[0m" else "" 
+    return InstallOutcome { ok: system(cmd) == 0, note: note }
 end
 
-fn install_bytes_dep(name: string, target: string, verbose: bool) -> bool is
+;; `-> name => path:<dir>` (or a bare `./dir` / `../dir` / `/abs/dir`) —
+;; a sibling package that already lives on disk, e.g. a shared lib next
+;; to this project in the same repo with no formal `[workspace]` tying
+;; them together. Never touches the registry or git at all: `dir` is
+;; symlinked straight into the package cache under this dep's name, so
+;; the compiler's normal package resolution (which already knows how to
+;; read a `Bytes.hk`/`bytes.hk` manifest or fall back to `src/lib.h#` /
+;; `src/main.h#` inside a cached package dir) finds it exactly like any
+;; fetched dependency — except a symlink (re-made fresh on every run,
+;; not just when missing) always reflects the CURRENT contents of `dir`,
+;; the same live-local-edits contract Cargo's `path = "../foo"` gives.
+fn install_path_dep(name: string, rel_or_abs: string, target: string, verbose: bool) -> InstallOutcome is
+    if rel_or_abs == "" is
+        return InstallOutcome { ok: false, note: "  \x1b[31merror:\x1b[0m path dependency '" + name + "' has no directory" }
+    end
+    if !dir_exists(rel_or_abs) is
+        return InstallOutcome { ok: false, note: "  \x1b[31merror:\x1b[0m path dependency '" + name + "' points at '" +
+                        rel_or_abs + "', which doesn't exist (relative to the project root)" }
+    end
+
+    ;; Always re-link, even if `target` already exists — a path dep
+    ;; tracks local edits live, it's never a frozen snapshot the way a
+    ;; fetched git/bytes dep is, so a stale symlink from an earlier
+    ;; layout must never be trusted just because *something* is there.
+    if dir_exists(target) || file_exists(target) is
+        system("rm -rf '" + target + "'")
+    end
+
+    ;; `ln`'s target needs an absolute (or at least cwd-independent) path
+    ;; — a relative one would be interpreted relative to the *symlink's*
+    ;; own directory (build/cache/packages/), not the project root bytes
+    ;; runs from. `"$(pwd)"` (quoted, so a path with spaces still works)
+    ;; is resolved by the shell `system()` already goes through — the
+    ;; same trick `cmd_build` uses to capture cwd via a redirected `pwd`.
+    let abs_path: string = if string_starts_with(rel_or_abs, "/") then "'" + rel_or_abs + "'"
+                            else "\"$(pwd)/" + rel_or_abs + "\"" 
+    let cmd: string = "ln -sfn " + abs_path + " '" + target + "'"
+    let rc:  int    = system(cmd)
+    let note: string = if rc != 0 then "  \x1b[31merror:\x1b[0m failed to link local path '" + rel_or_abs + "' for '" + name + "'"
+                        else if verbose then "  \x1b[2m" + name + " (local path: " + rel_or_abs + ")\x1b[0m"
+                        else "" 
+    return InstallOutcome { ok: rc == 0, note: note }
+end
+
+fn install_bytes_dep(name: string, target: string, verbose: bool) -> InstallOutcome is
     ;; Fetch registry and look up package
     let reg: registry::Registry = registry::registry_load_cached()
     let entry: registry::RegEntry = registry::registry_find(reg, name)
 
-    if entry.name == "" is
+    if registry::reg_name(entry) == "" is
         ;; Create stub .h# file so compilation can proceed
         let stub: string = pkg_cache_dir() + "/" + name + ".h#"
         file_write(stub, ";; bytes stub: " + name + "\n;; Install via: bytes add " + name + "\n")
-        write("  \x1b[33mwarn:\x1b[0m '" + name + "' not in registry, stub created")
-        return true
+        return InstallOutcome { ok: true, note: "  \x1b[33mwarn:\x1b[0m '" + name + "' not in registry, stub created" }
     end
 
-    return install_git_dep(name, entry.git, target, verbose)
+    return install_git_dep(name, registry::reg_git(entry), target, verbose)
 end
 
 ;; `-> name => vX.Y[.Z]` — pin to that exact published version. Looked
 ;; up in the registry same as a plain bytes dep, but instead of cloning
 ;; whatever the default branch happens to be, checks out the git tag
 ;; matching the requested version.
-fn install_bytes_dep_pinned(name: string, version_spec: string, target: string, verbose: bool) -> bool is
+fn install_bytes_dep_pinned(name: string, version_spec: string, target: string, verbose: bool) -> InstallOutcome is
     let reg:   registry::Registry = registry::registry_load_cached()
     let entry: registry::RegEntry = registry::registry_find(reg, name)
 
-    if entry.name == "" is
-        write("  \x1b[31merror:\x1b[0m '" + name + "' not in registry — cannot pin to " + version_spec)
-        return false
+    if registry::reg_name(entry) == "" is
+        return InstallOutcome { ok: false, note: "  \x1b[31merror:\x1b[0m '" + name + "' not in registry — cannot pin to " + version_spec }
     end
 
-    return install_git_dep_ref(name, entry.git, version_spec, target, verbose)
+    return install_git_dep_ref(name, registry::reg_git(entry), version_spec, target, verbose)
 end
 
 ;; `-> name => newest` — always take the latest revision and build it
 ;; from source, rather than trusting a possibly-stale cache the way a
 ;; plain `bytes` dep does. If it's already cloned, fast-forward it in
 ;; place; otherwise clone fresh from the registry's git URL.
-fn install_bytes_dep_newest(name: string, target: string, verbose: bool) -> bool is
+fn install_bytes_dep_newest(name: string, target: string, verbose: bool) -> InstallOutcome is
     let reg:   registry::Registry = registry::registry_load_cached()
     let entry: registry::RegEntry = registry::registry_find(reg, name)
 
-    if entry.name == "" is
+    if registry::reg_name(entry) == "" is
         let stub: string = pkg_cache_dir() + "/" + name + ".h#"
         file_write(stub, ";; bytes stub: " + name + "\n;; Install via: bytes add " + name + "\n")
-        write("  \x1b[33mwarn:\x1b[0m '" + name + "' not in registry, stub created")
-        return true
+        return InstallOutcome { ok: true, note: "  \x1b[33mwarn:\x1b[0m '" + name + "' not in registry, stub created" }
     end
 
     if dir_exists(target) is
         let cmd: string = "git -C '" + target + "' pull --ff-only 2>/dev/null"
-        if verbose is write("  \x1b[2m$ " + cmd + "\x1b[0m") end
         system(cmd)
-        if verbose is write("  \x1b[2m" + name + " (synced to newest, will build from source)\x1b[0m") end
-        return true
+        let note: string = if verbose then "  \x1b[2m" + name + " (synced to newest, will build from source)\x1b[0m" else "" 
+        return InstallOutcome { ok: true, note: note }
     end
 
-    return install_git_dep(name, entry.git, target, verbose)
+    return install_git_dep(name, registry::reg_git(entry), target, verbose)
 end
 
 ;; Same as `install_git_dep`, but checks out a specific tag instead of
 ;; whatever HEAD of the default branch is. Accepts either "0.2" or
 ;; "v0.2" — the "v" prefix is added if missing, since that's the tag
 ;; convention the Bytes registry expects.
-fn install_git_dep_ref(name: string, url: string, version_spec: string, target: string, verbose: bool) -> bool is
+fn install_git_dep_ref(name: string, url: string, version_spec: string, target: string, verbose: bool) -> InstallOutcome is
     if dir_exists(target) is
-        if verbose is write("  \x1b[2m" + name + " (git cached @ " + version_spec + ")\x1b[0m") end
-        return true
+        return InstallOutcome { ok: true, note: if verbose then "  \x1b[2m" + name + " (git cached @ " + version_spec + ")\x1b[0m" else "" }
     end
     let tag: string = if string_starts_with(version_spec, "v") then version_spec else "v" + version_spec
     let cmd: string = "git clone --depth=1 --branch '" + tag + "' '" + url + "' '" + target + "' 2>/dev/null"
-    if verbose is write("  \x1b[2m$ " + cmd + "\x1b[0m") end
-    return system(cmd) == 0
+    let note: string = if verbose then "  \x1b[2m$ " + cmd + "\x1b[0m" else "" 
+    return InstallOutcome { ok: system(cmd) == 0, note: note }
 end
 
 ;; ── Python zależności ─────────────────────────────────────────────────────────
@@ -180,11 +264,19 @@ pub fn cmd_add(name: string, kind: string, source: string, verbose: bool) -> int
     end
 
     let content: string = file_read(hk_path)
-    let has_deps: bool = string_contains(content, "[deps]")
+    ;; Insert into whichever spelling of the section this project's
+    ;; Bytes.hk already uses — "[deps]" (canonical) or "[dependencies]"
+    ;; (the Cargo-style alias config::parse also accepts — see its
+    ;; section-header comment). Falling back to always creating a brand
+    ;; new "[deps]" block regardless would leave a project that already
+    ;; has "[dependencies]" with two separate dependency sections.
+    let existing_header: string = if string_contains(content, "[deps]") then "[deps]"
+                                   else if string_contains(content, "[dependencies]") then "[dependencies]"
+                                   else "" 
     let dep_line: string = "-> " + name + " => " + if source != "" then source else kind 
 
-    let new_content: string = if has_deps is
-        string_replace(content, "[deps]", "[deps]\n" + dep_line)
+    let new_content: string = if existing_header != "" is
+        string_replace(content, existing_header, existing_header + "\n" + dep_line)
     else is
         content + "\n[deps]\n" + dep_line + "\n"
     end
@@ -197,7 +289,8 @@ pub fn cmd_add(name: string, kind: string, source: string, verbose: bool) -> int
     if kind == "git" || string_starts_with(source, "http") is
         let target: string = pkg_cache_dir() + "/" + name
         if !dir_exists(pkg_cache_dir()) is dir_create(pkg_cache_dir()) end
-        install_git_dep(name, source, target, verbose)
+        let add_result: InstallOutcome = install_git_dep(name, source, target, verbose)
+        if add_result.note != "" is write(add_result.note) end
     end
 
     write("  Run 'bytes build' to compile")
