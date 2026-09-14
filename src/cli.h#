@@ -186,7 +186,7 @@ fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool) is
     if !dir_exists("build/cache") is dir_create("build/cache") end
 
     ;; Install deps first
-    if proj.dep_count > 0 is
+    if config::dep_count(proj) > 0 is
         let cache: isolation::BytesCache = isolation::bytes_cache_open()
         installer::install_all(proj, release, verbose)
     end
@@ -308,7 +308,7 @@ fn cmd_install(verbose: bool, release: bool) is
     print_header()
     let proj: config::Project = config::load()
 
-    if proj.dep_count == 0 is
+    if config::dep_count(proj) == 0 is
         write("  \x1b[2mNothing to install.\x1b[0m")
         return
     end
@@ -336,27 +336,31 @@ fn cmd_list() is
     write("  \x1b[1mDependencies:\x1b[0m " + config::pkg_name(proj) + " v" + config::pkg_version(proj))
     write("")
 
-    if proj.dep_count == 0 is
+    if config::dep_count(proj) == 0 is
         write("  \x1b[2m(no dependencies)\x1b[0m")
         write("")
         return
     end
 
     let mut i: int = 0
-    while i < proj.dep_count is
-        let dep: config::DepEntry = proj.deps[i]
-        let kind_col: string = match dep.kind is
+    while i < config::dep_count(proj) is
+        let dep:      config::DepEntry = config::dep_at(proj, i)
+        let dep_name: string = config::dep_name(dep)
+        let dep_kind: string = config::dep_kind(dep)
+        let dep_src:  string = config::dep_source(dep)
+        let kind_col: string = match dep_kind is
             "dynamic" => "\x1b[36mdynamic\x1b[0m"
             "static"  => "\x1b[33mstatic\x1b[0m"
             "git"     => "\x1b[35mgit\x1b[0m"
-            "version" => "\x1b[34m" + dep.source + "\x1b[0m"
+            "version" => "\x1b[34m" + dep_src + "\x1b[0m"
             "newest"  => "\x1b[92mnewest\x1b[0m"
+            "path"    => "\x1b[95mpath\x1b[0m"
             "invalid" => "\x1b[31minvalid\x1b[0m"
             _         => "\x1b[32mbytes\x1b[0m"
         end
-        write("  " + string_pad_right(dep.name, 24) + " " + kind_col +
-              if dep.source != dep.kind && dep.source != "" then
-                "  \x1b[2m" + dep.source + "\x1b[0m"
+        write("  " + string_pad_right(dep_name, 24) + " " + kind_col +
+              if dep_src != dep_kind && dep_src != "" then
+                "  \x1b[2m" + dep_src + "\x1b[0m"
               else "" end)
         i += 1
     end
@@ -381,7 +385,7 @@ fn cmd_search(query: string) is
     let mut i: int = 0
     while i < n is
         let p: registry::RegEntry = results[i]
-        write("  \x1b[36m" + string_pad_right(p.name, 24) + "\x1b[0m  " + p.git)
+        write("  \x1b[36m" + string_pad_right(registry::reg_name(p), 24) + "\x1b[0m  " + registry::reg_git(p))
         i += 1
     end
     write("")
@@ -391,18 +395,19 @@ fn cmd_info_pkg(pkg: string) is
     print_header()
     let reg:   registry::Registry = registry::registry_load_cached()
     let entry: registry::RegEntry = registry::registry_find(reg, pkg)
+    let e_name: string = registry::reg_name(entry)
 
-    if entry.name == "" is
+    if e_name == "" is
         write("  \x1b[31merror:\x1b[0m package '" + pkg + "' not found in registry")
         write("  Try: bytes search " + pkg)
         exit(1)
     end
 
-    write("  \x1b[1m" + entry.name + "\x1b[0m")
-    write("  \x1b[2mSource:\x1b[0m  " + entry.git)
-    write("  \x1b[2mVersion:\x1b[0m " + entry.version)
+    write("  \x1b[1m" + e_name + "\x1b[0m")
+    write("  \x1b[2mSource:\x1b[0m  " + registry::reg_git(entry))
+    write("  \x1b[2mVersion:\x1b[0m " + registry::reg_version(entry))
     write("")
-    write("  bytes add " + entry.name)
+    write("  bytes add " + e_name)
     write("")
 end
 
