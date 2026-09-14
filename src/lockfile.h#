@@ -5,6 +5,14 @@ pub struct LockedPkg is
     pub checksum: string
 end
 
+;; [FIXED] `installer.h#`'s `install_hsharp_deps` used to read
+;; `locked.name` directly off a `let locked: lockfile::LockedPkg =
+;; lockfile_get(...)` local — the same cross-module ambiguous-field
+;; issue documented in config.h#'s `ws_name` fix (`.name` is also a
+;; field of `DepEntry` and `RegEntry`). Same fix: a same-module accessor.
+pub fn locked_name(p: LockedPkg) -> string is return p.name end
+pub fn locked_version(p: LockedPkg) -> string is return p.version end
+
 pub struct LockFile is
     pub packages:   [LockedPkg]
     pub pkg_count:  int
