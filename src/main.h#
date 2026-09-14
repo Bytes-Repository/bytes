@@ -97,8 +97,21 @@ fn main() is
             if rc != 0 is exit(rc) end
         end
         "add" => is
-            let pkg:     string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
-            let version: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 1)
+            ;; [FIXED] every branch below used to call `arg_at(positional,
+            ;; 0, N)` — the *literal* `0` in the argc slot, not the
+            ;; list's actual length. `arg_at` only returns `args[i]` when
+            ;; `i < argc`, so with argc hard-coded to 0 that guard was
+            ;; `0 < 0`: always false, for every command, regardless of
+            ;; what was actually typed. That's the single root cause
+            ;; behind "bytes add hprompt" silently adding a dependency
+            ;; named "" (visible as "Adding  to project..." with the
+            ;; package name missing) instead of "hprompt" — every one of
+            ;; these commands needs the positional list computed once and
+            ;; its real length passed through.
+            let positional: [string] = cli::args_positional(extra, extra_count)
+            let pcount:      int      = array_len(positional)
+            let pkg:     string = cli::arg_at(positional, pcount, 0)
+            let version: string = cli::arg_at(positional, pcount, 1)
             if string_starts_with(pkg, "python:") || string_starts_with(pkg, "py:") is
                 let py_name: string = string_replace(string_replace(pkg, "python:", ""), "py:", "")
                 cli::cmd_python_pkg(py_name, version)
@@ -107,7 +120,8 @@ fn main() is
             end
         end
         "remove" | "rm" => is
-            let pkg: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            let positional: [string] = cli::args_positional(extra, extra_count)
+            let pkg: string = cli::arg_at(positional, array_len(positional), 0)
             cli::cmd_remove(pkg)
         end
         "install" => is
@@ -120,22 +134,27 @@ fn main() is
             cli::cmd_list()
         end
         "search" => is
-            let q: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            let positional: [string] = cli::args_positional(extra, extra_count)
+            let q: string = cli::arg_at(positional, array_len(positional), 0)
             cli::cmd_search(q)
         end
         "info" => is
-            let pkg: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
+            let positional: [string] = cli::args_positional(extra, extra_count)
+            let pkg: string = cli::arg_at(positional, array_len(positional), 0)
             cli::cmd_info_pkg(pkg)
         end
         "python" => is
-            let pkg: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
-            let ver: string = cli::arg_at(cli::args_positional(extra, extra_count), 0, 1)
+            let positional: [string] = cli::args_positional(extra, extra_count)
+            let pcount:      int      = array_len(positional)
+            let pkg: string = cli::arg_at(positional, pcount, 0)
+            let ver: string = cli::arg_at(positional, pcount, 1)
             cli::cmd_python_pkg(pkg, ver)
         end
         "workspace" | "ws" => is
-            let sub:  string   = cli::arg_at(cli::args_positional(extra, extra_count), 0, 0)
-            let rest: [string] = cli::args_from(cli::args_positional(extra, extra_count),
-                                                array_len(cli::args_positional(extra, extra_count)), 1)
+            let positional: [string]   = cli::args_positional(extra, extra_count)
+            let pcount:      int        = array_len(positional)
+            let sub:  string   = cli::arg_at(positional, pcount, 0)
+            let rest: [string] = cli::args_from(positional, pcount, 1)
             let sub_name: string = if sub == "" then "info" else sub 
             cli::cmd_workspace(sub_name, rest, array_len(rest), release, verbose)
         end
