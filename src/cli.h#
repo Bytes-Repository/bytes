@@ -26,13 +26,24 @@ fn find_hsh() -> string is
 end
 
 ;; ── Argument helpers ──────────────────────────────────────────────────────────
+;;
+;; [FIX] `arg_at`/`arg_has`/`args_from`/`args_positional` and every
+;; `cmd_*` command below are called from `main.h#` as `cli::arg_at(...)`,
+;; `cli::cmd_build(...)`, etc. — but none of them were declared `pub`, so
+;; from another module's point of view they didn't exist at all. That's
+;; the same class of bug as the missing `config::dep_count` and friends:
+;; it compiles cleanly right up until LLVM codegen tries to resolve the
+;; call and finds no function by that name, then fails with
+;; `codegen: undefined fn`. Marked `pub` here so `main.h#` can actually
+;; see them (`find_hsh` and `read_input` stay module-private — nothing
+;; outside cli.h# calls those).
 
-fn arg_at(args: [string], argc: int, i: int) -> string is
+pub fn arg_at(args: [string], argc: int, i: int) -> string is
     if i < argc is return args[i] end
     return ""
 end
 
-fn arg_has(args: [string], argc: int, flag: string) -> bool is
+pub fn arg_has(args: [string], argc: int, flag: string) -> bool is
     let mut i: int = 0
     while i < argc is
         if args[i] == flag is return true end
@@ -41,7 +52,7 @@ fn arg_has(args: [string], argc: int, flag: string) -> bool is
     return false
 end
 
-fn args_from(args: [string], argc: int, start_idx: int) -> [string] is
+pub fn args_from(args: [string], argc: int, start_idx: int) -> [string] is
     let mut result: [string] = []
     let mut i: int = start_idx
     while i < argc is
@@ -51,7 +62,7 @@ fn args_from(args: [string], argc: int, start_idx: int) -> [string] is
     return result
 end
 
-fn args_positional(args: [string], argc: int) -> [string] is
+pub fn args_positional(args: [string], argc: int) -> [string] is
     let mut result: [string] = []
     let mut i: int = 0
     while i < argc is
@@ -116,7 +127,7 @@ end
 
 ;; ── Commands ──────────────────────────────────────────────────────────────────
 
-fn cmd_new(name: string, is_lib: bool, is_ws: bool) is
+pub fn cmd_new(name: string, is_lib: bool, is_ws: bool) is
     if name == "" is
         write("  \x1b[31merror:\x1b[0m Usage: bytes new <name>")
         exit(1)
@@ -159,7 +170,7 @@ fn cmd_new(name: string, is_lib: bool, is_ws: bool) is
     write("")
 end
 
-fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool) is
+pub fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool) is
     print_header()
     let proj: config::Project = config::load()
 
@@ -240,7 +251,7 @@ fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool) is
     write("")
 end
 
-fn cmd_run(file: string, run_args: [string], run_argc: int, release: bool, verbose: bool) is
+pub fn cmd_run(file: string, run_args: [string], run_argc: int, release: bool, verbose: bool) is
     if file != "" && !file_exists(file) is
         write("  \x1b[31merror:\x1b[0m file not found: " + file)
         exit(1)
@@ -275,7 +286,7 @@ fn cmd_run(file: string, run_args: [string], run_argc: int, release: bool, verbo
     exit(run_rc)
 end
 
-fn cmd_check(extra: [string], extra_count: int, verbose: bool) is
+pub fn cmd_check(extra: [string], extra_count: int, verbose: bool) is
     let proj:  config::Project = config::load()
     let hsh:   string = find_hsh()
     let entry: string = if extra_count > 0 && !string_starts_with(extra[0], "-") then
@@ -293,7 +304,7 @@ fn cmd_check(extra: [string], extra_count: int, verbose: bool) is
     if rc != 0 is exit(rc) end
 end
 
-fn cmd_clean(everything: bool) is
+pub fn cmd_clean(everything: bool) is
     if dir_exists("build") is
         dir_remove_all("build")
         write("  \x1b[32m✓\x1b[0m  cleaned build/")
@@ -304,7 +315,7 @@ fn cmd_clean(everything: bool) is
     end
 end
 
-fn cmd_add(pkg: string, version: string, release: bool) is
+pub fn cmd_add(pkg: string, version: string, release: bool) is
     print_header()
     write("  \x1b[2mAdding\x1b[0m \x1b[33m" + pkg + "\x1b[0m to project...")
 
@@ -315,12 +326,12 @@ fn cmd_add(pkg: string, version: string, release: bool) is
     installer::cmd_add(pkg, kind, source, release)
 end
 
-fn cmd_remove(pkg: string) is
+pub fn cmd_remove(pkg: string) is
     print_header()
     installer::cmd_remove_dep(pkg)
 end
 
-fn cmd_install(verbose: bool, release: bool) is
+pub fn cmd_install(verbose: bool, release: bool) is
     print_header()
     let proj: config::Project = config::load()
 
@@ -332,7 +343,7 @@ fn cmd_install(verbose: bool, release: bool) is
     installer::install_all(proj, release, verbose)
 end
 
-fn cmd_update() is
+pub fn cmd_update() is
     print_header()
     write("  \x1b[2mUpdating registry cache...\x1b[0m")
     ;; Force fresh registry fetch
@@ -345,7 +356,7 @@ fn cmd_update() is
     write("  Run 'bytes install' to reinstall dependencies")
 end
 
-fn cmd_list() is
+pub fn cmd_list() is
     print_header()
     let proj: config::Project = config::load()
 
@@ -383,7 +394,7 @@ fn cmd_list() is
     write("")
 end
 
-fn cmd_search(query: string) is
+pub fn cmd_search(query: string) is
     print_header()
     write("  \x1b[2mSearching registry for '" + query + "'...\x1b[0m")
     let reg: registry::Registry = registry::registry_load_cached()
@@ -407,7 +418,7 @@ fn cmd_search(query: string) is
     write("")
 end
 
-fn cmd_info_pkg(pkg: string) is
+pub fn cmd_info_pkg(pkg: string) is
     print_header()
     let reg:   registry::Registry = registry::registry_load_cached()
     let entry: registry::RegEntry = registry::registry_find(reg, pkg)
@@ -427,7 +438,7 @@ fn cmd_info_pkg(pkg: string) is
     write("")
 end
 
-fn cmd_python_pkg(pkg: string, version: string) is
+pub fn cmd_python_pkg(pkg: string, version: string) is
     print_header()
     write("  \x1b[2mInstalling Python package: \x1b[0m" + pkg)
     let cache_dir: string = "build/cache"
@@ -441,7 +452,7 @@ fn cmd_python_pkg(pkg: string, version: string) is
     end
 end
 
-fn cmd_workspace(sub: string, extra: [string], extra_count: int, release: bool, verbose: bool) is
+pub fn cmd_workspace(sub: string, extra: [string], extra_count: int, release: bool, verbose: bool) is
     match sub is
         "info" | "status" => is
             print_header()
@@ -490,7 +501,7 @@ fn cmd_workspace(sub: string, extra: [string], extra_count: int, release: bool, 
     end
 end
 
-fn cmd_cache_info() is
+pub fn cmd_cache_info() is
     print_header()
     let base: string = isolation::hackeros_cache_base()
     write("  \x1b[1mBytes cache:\x1b[0m")
@@ -531,7 +542,7 @@ fn read_input(prompt: string) -> string is
     return val
 end
 
-fn cmd_settings() is
+pub fn cmd_settings() is
     write("\x1b[1m\x1b[36mbytes settings\x1b[0m")
     write("  \x1b[2mConfig: " + settings::settings_path() + "\x1b[0m")
     write("")
@@ -591,7 +602,7 @@ fn cmd_settings() is
     end
 end
 
-fn cmd_langs() is
+pub fn cmd_langs() is
     print_header()
     write("  \x1b[1mSupported languages in workspace-special:\x1b[0m")
     write("")
