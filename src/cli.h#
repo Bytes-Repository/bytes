@@ -169,6 +169,22 @@ fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool) is
             string_trim(file_read("/tmp/bytes_cwd.txt"))
         else "."
         system("export BYTES_WORKSPACE_ROOT=" + cwd)
+
+        ;; EXPANSION: `bytes build --release <member>` builds just that
+        ;; one workspace member — see `workspace::build_workspace_member`'s
+        ;; doc comment. BUG FIX: `extra`/`extra_count` (this command's own
+        ;; positional args) used to be read *only* in the non-workspace
+        ;; branch below; inside a workspace project any positional arg
+        ;; after `bytes build`/`bytes build --release` was silently
+        ;; dropped and the whole workspace was rebuilt every time
+        ;; regardless — there was no way to build a single member on its
+        ;; own at all.
+        if extra_count > 0 && !string_starts_with(extra[0], "-") is
+            let rc: int = workspace::build_workspace_member(proj, extra[0], release, verbose)
+            if rc != 0 is exit(rc) end
+            return
+        end
+
         let rc: int = workspace::build_workspace(proj, release, verbose)
         if rc != 0 is exit(rc) end
         return
