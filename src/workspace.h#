@@ -319,6 +319,83 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
     }
 end
 
+;; ── Single-member build ──────────────────────────────────────────────────────
+
+;; EXPANSION: build exactly one named workspace member — `bytes build
+;; --release <member>` — instead of the whole workspace. See `cli.h#`'s
+;; `cmd_build`, which now routes here whenever a positional arg is given
+;; inside a workspace project; previously that arg was silently ignored
+;; there and `bytes build --release <member>` always rebuilt *every*
+;; member regardless of what (if anything) followed `--release`, with no
+;; way to build a single member on its own — exactly the workflow a
+;; multi-member project like Isolator's `isolator-workspace` (members
+;; `source-code`/`isolated`/`builder`/`daemon`) needs day to day.
+;;
+;; Reuses `build_member` itself for the actual compile; this wrapper
+;; only adds member-name validation (a clear error listing every valid
+;; member for a typo, instead of `build_member`'s generic "directory not
+;; found"), a toolchain preflight check for just that member's language,
+;; and a single-member header/summary consistent with `build_workspace`'s
+;; own multi-member one.
+pub fn build_workspace_member(proj: config::Project, member: string, release: bool, verbose: bool) -> int is
+    let ws_root: string = env_get("BYTES_WORKSPACE_ROOT")
+    if ws_root != "" is
+        system("cd " + ws_root)
+    end
+
+    let members: [string] = config::ws_members(proj)
+    let mut found: bool = false
+    let mut i: int = 0
+    while i < array_len(members) is
+        if string_trim(members[i]) == member is found = true end
+        i += 1
+    end
+
+    if !found is
+        write("  \x1b[31merror:\x1b[0m no workspace member named '" + member + "'")
+        write("  \x1b[2mAvailable members:\x1b[0m")
+        i = 0
+        while i < array_len(members) is
+            write("    - " + members[i])
+            i += 1
+        end
+        return 1
+    end
+
+    let lang: string = config::ws_member_lang(proj, member)
+    let tc: ToolchainCheck = check_toolchain(lang)
+    if !tc.present is
+        write("  \x1b[31merror:\x1b[0m " + lang + " toolchain not found for member '" + member + "' — " + tc.hint)
+        return 1
+    end
+
+    progress::print_build_header(config::ws_name(proj) + "::" + member, config::ws_version(proj), release)
+
+    let t_start: int = time_ms()
+    let res: progress::MemberStatus = build_member(member, lang, release, verbose)
+    progress::print_member(res)
+
+    ;; Same "also collect into the shared top-level build/ dir" behavior
+    ;; `build_workspace`'s own loop applies to every member — a
+    ;; single-member build should still land in the same
+    ;; Cargo-`target/`-style shared location, not only under
+    ;; `<member>/build/...`.
+    let res_bin_path: string = progress::member_bin_path(res)
+    if progress::member_success(res) && res_bin_path != "" && file_exists(res_bin_path) is
+        let ws_build_dir: string = if ws_root != "" then ws_root + "/build" else "build" 
+        if !dir_exists(ws_build_dir) is dir_create(ws_build_dir) end
+        let collected: string = ws_build_dir + "/" + path_basename(res_bin_path)
+        system("cp -f " + sh_quote(res_bin_path) + " " + sh_quote(collected))
+    end
+
+    let elapsed: int = time_ms() - t_start
+    let passed: int = if progress::member_success(res) then 1 else 0
+    let failed: int = if progress::member_success(res) then 0 else 1
+    progress::print_build_summary(passed, failed, elapsed)
+
+    return if progress::member_success(res) then 0 else 1
+end
+
 ;; ── Workspace build ───────────────────────────────────────────────────────────
 
 pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> int is
