@@ -89,6 +89,48 @@ pub fn default_project() -> Project is
     }
 end
 
+;; ── Dependency accessors ─────────────────────────────────────────────────────
+;;
+;; [FIX] installer.h#, deps.h#, cli.h# and info.h# all call these as
+;; `config::dep_count(proj)` / `config::dep_at(proj, i)` /
+;; `config::dep_name(dep)` / `config::dep_kind(dep)` / `config::dep_source(dep)`,
+;; but none of them were ever defined — `dep_count` only existed as the
+;; `Project.dep_count` *field*, and `DepEntry.name/kind/source` only as
+;; plain fields, never as callable functions. The h# v0.8 LLVM backend has
+;; no fallback for that: a call to a name with no matching function is a
+;; hard `codegen: undefined fn` error, which is exactly what surfaced when
+;; compiling `src/main.h#` (first hit at installer.h#'s `dep_count` call,
+;; but every other call below was equally broken and would have failed
+;; next, one at a time, as each got fixed in turn).
+;;
+;; These follow the same same-module-accessor pattern already used for
+;; `ws_name`/`ws_version`/`ws_mode`/`ws_build_order`/`build_cache_dir`
+;; above: `DepEntry` (like `WorkspaceConfig`) shares field names ("name",
+;; "kind"/"source") with other structs in this project (`PackageConfig`,
+;; `DocItem`, ...), so a raw cross-module `dep.name` chain risks the same
+;; "cannot statically determine the struct type — guessing" ambiguity the
+;; compiler warns about for those. Defining the accessor here, in the
+;; same module as the struct itself, sidesteps that entirely.
+pub fn dep_count(proj: Project) -> int is
+    return proj.dep_count
+end
+
+pub fn dep_at(proj: Project, i: int) -> DepEntry is
+    return proj.deps[i]
+end
+
+pub fn dep_name(dep: DepEntry) -> string is
+    return dep.name
+end
+
+pub fn dep_kind(dep: DepEntry) -> string is
+    return dep.kind
+end
+
+pub fn dep_source(dep: DepEntry) -> string is
+    return dep.source
+end
+
 ;; ── Parser .hk ───────────────────────────────────────────────────────────────
 
 fn hk_trim(s: string) -> string is return string_trim(s) end
