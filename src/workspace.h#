@@ -158,11 +158,7 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
     end
 
     if !dir_exists(member_dir) is
-        return MemberStatus {
-            name: name, lang: lang, success: false,
-            output: "directory '" + name + "' not found",
-            elapsed: time_ms() - t0, bin_path: ""
-        }
+        return progress::member_status_new(name, lang, false, "directory '" + name + "' not found", time_ms() - t0, "")
     end
 
     ;; Ensure build dir
@@ -313,10 +309,7 @@ pub fn build_member(name: string, lang: string, release: bool, verbose: bool) ->
         end
     end
 
-    return MemberStatus {
-        name: name, lang: lang, success: success,
-        output: output, elapsed: time_ms() - t0, bin_path: bin_path
-    }
+    return progress::member_status_new(name, lang, success, output, time_ms() - t0, bin_path)
 end
 
 ;; ── Single-member build ──────────────────────────────────────────────────────
