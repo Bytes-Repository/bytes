@@ -159,8 +159,33 @@ end
 ;;   - "newest" (case-insensitive) → always take the latest revision and
 ;;     build it from source instead of trusting whatever is cached
 ;;     (kind "newest" — see `install_bytes_dep_newest`)
+;;   - "path:<dir>", or a bare `./dir` / `../dir` / `/abs/dir` with no
+;;     prefix at all → a sibling package that already lives on disk
+;;     (kind "path" — see installer.h#'s `install_path_dep`, which
+;;     symlinks `<dir>` straight into `build/cache/packages/<name>` so
+;;     the H# compiler's own package resolution, `bytes_resolve.rs`'s
+;;     `find_pkg_entry`, finds it exactly like any fetched dependency)
 ;;   - anything else / empty     → plain bytes-registry lookup by name
 ;;     (kind "bytes", unchanged default behaviour)
+;;
+;; [FIXED] `install_path_dep` (installer.h#) and the "path" row in
+;; `deps.h#`'s `show_deps` table were both already written and wired up
+;; — `install_hsharp_deps`'s dispatch already has a `"path" =>
+;; install_path_dep(...)` arm — but nothing here ever actually produced
+;; `kind: "path"`: every value that wasn't "dynamic"/"static"/a version
+;; spec/"newest"/a git or http URL fell straight through to the final
+;; `else "bytes"` below, i.e. a registry lookup. That's exactly what
+;; happened to `hsh`'s `-> hprompt => newest` dependency on its sibling
+;; `../hprompt` package: classified "newest", looked up in the (empty,
+;; for an unpublished local package) registry, found nothing, and
+;; `install_bytes_dep_newest` fell back to writing an empty stub file —
+;; which the H# compiler's `resolve_bytes_import` then dutifully
+;; imported (no import-time error — the stub package genuinely exists
+;; on disk), only to fail later at codegen with "undefined fn" for
+;; every real function the stub doesn't define. Recognizing "path:..."
+;; / a bare relative-or-absolute directory here, ahead of the final
+;; "bytes" fallback, is what actually routes such a dependency to
+;; `install_path_dep` instead.
 ;;
 ;; The bare word "git" with nothing else (`-> lib => git`) used to also
 ;; fall into the "git" bucket via `starts_with(val, "git")` below, and
@@ -185,6 +210,48 @@ fn is_version_spec(val: string) -> bool is
     if string_len(v) < 2 || string_at(v, 0) != "v" is return false end
     let c: string = string_at(v, 1)
     return c >= "0" && c <= "9"
+end
+
+;; "path:<dir>" (explicit prefix), or a bare directory reference with no
+;; prefix at all — `./dir`, `../dir`, or an absolute `/dir`. A plain
+;; bare word with none of those leading forms (e.g. a package name
+;; that's meant for the registry) is deliberately NOT treated as a
+;; path — only these unambiguous directory-shaped forms are, so an
+;; ordinary `-> somepkg => bytes`-style registry dep can never be
+;; accidentally reclassified.
+fn is_path_spec(val: string) -> bool is
+    let v: string = hk_trim(val)
+    ;; [FIXED] Was written as `return A || B || C || D` split across
+    ;; lines with each `||` LEADING the next line. That's the opposite
+    ;; of the only multi-line-boolean style already used elsewhere in
+    ;; this codebase (config.h#'s own `if line == "" || ... ||` a few
+    ;; hundred lines up, doc_gen.h#, fmt_cmd.h#) — those all put the
+    ;; operator TRAILING at the end of the line, so the parser is still
+    ;; visibly mid-expression when the newline hits. With a leading
+    ;; `||`, `return string_starts_with(v, "path:")` reads as a
+    ;; complete, valid statement all by itself, so the parser closes it
+    ;; right there — and then sees the next line starting with `||` as
+    ;; the start of a *new* expression, which it parses as a Rust-style
+    ;; zero-argument closure literal (`|| body`), not as "OR with the
+    ;; previous line". The LLVM backend has no closure support at all,
+    ;; hence "closures are not implemented" — a genuinely confusing
+    ;; error for what was really just an operator-placement mistake on
+    ;; my part. Side-stepped entirely here with separate single-line
+    ;; `if/is/end` checks instead of relying on any multi-line operator
+    ;; continuation.
+    if string_starts_with(v, "path:") is return true end
+    if string_starts_with(v, "./") is return true end
+    if string_starts_with(v, "../") is return true end
+    if string_starts_with(v, "/") is return true end
+    return false
+end
+
+;; Strips a leading "path:" if present; a bare `./`/`../`/`/` form is
+;; already exactly the directory `install_path_dep` wants and passes
+;; through unchanged.
+fn path_spec_dir(val: string) -> string is
+    let v: string = hk_trim(val)
+    return if string_starts_with(v, "path:") then string_slice(v, 5, string_len(v)) else v 
 end
 
 pub fn hk_parse_key(line: string) -> string is
@@ -291,8 +358,10 @@ pub fn parse(content: string) -> Project is
                                        else if is_version_spec(val) then "version"
                                        else if string_starts_with(val, "git") then "git"
                                        else if string_starts_with(val, "http") then "git"
+                                       else if is_path_spec(val) then "path"
                                        else "bytes"
-                    proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: kind, source: val })
+                    let source: string = if kind == "path" then path_spec_dir(val) else val 
+                    proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: kind, source: source })
                     proj.dep_count += 1
                 end
             end
