@@ -66,6 +66,42 @@ pub fn registry_parse(json: string) -> Registry is
     let mut pkgs:  [RegEntry] = []
     let mut count: int        = 0
 
+    ;; [FIXED] This parser splits on the literal substring "},{" to
+    ;; separate array entries — which only ever matches when the JSON
+    ;; is fully compact, with each object butted right up against the
+    ;; next (`{"a":"b"},{"c":"d"}`). The real, live registry-index.json
+    ;; (both the version `registry_fetch` downloads and the one
+    ;; `build/cache/registry-index.json` caches locally) is
+    ;; pretty-printed — each `}`/`{` sits on its own line, separated by
+    ;; a comma, a newline, and indentation:
+    ;;
+    ;;   {
+    ;;     "hprompt": "https://github.com/Bytes-Repository/hprompt"
+    ;;   },
+    ;;   {
+    ;;     ...
+    ;;
+    ;; so the literal "},{" NEVER occurs anywhere in the actual file,
+    ;; `string_split` finds nothing to split on, `items` ends up as a
+    ;; single one-element array holding the *entire* JSON blob, and the
+    ;; body below — which strips every `{`/`}` from that "one item" and
+    ;; then takes quote_parts[1]/[3] as *the* name/url — only ever
+    ;; recovers the very first entry in the whole file ("mold" in the
+    ;; registry seen in practice), silently dropping every other
+    ;; package, "hprompt" included — hence `bytes` reporting a package
+    ;; "not in registry" that's plainly sitting right there in the
+    ;; index. Stripping whitespace up front turns the pretty-printed
+    ;; form back into the compact form this parser already handles,
+    ;; with no other change needed: none of the fields here (bare
+    ;; package names, plain https:// git URLs) can legitimately contain
+    ;; a space/tab/newline of their own, so this is safe to do
+    ;; unconditionally rather than only for still-more-special-cased
+    ;; formatting variants.
+    let json: string = string_replace(json, " ", "")
+    let json: string = string_replace(json, "\t", "")
+    let json: string = string_replace(json, "\n", "")
+    let json: string = string_replace(json, "\r", "")
+
     ;; Split by "},{" to get individual objects
     let items: [string] = string_split(json, "},{")
     let n: int = array_len(items)
