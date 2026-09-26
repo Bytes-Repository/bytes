@@ -74,6 +74,41 @@ pub fn args_positional(args: [string], argc: int) -> [string] is
     return result
 end
 
+;; ── Feature-flag helpers ─────────────────────────────────────────────────────
+;;
+;; [FEATURES] `--features` accepts either a single comma-separated value
+;; (`--features a,b,c`, Cargo's usual form) or repeated flags
+;; (`--features a --features b`) — both are folded into one flat list
+;; here so main.h# only has to call this once with everything it
+;; collected. `--all-features` and `--no-default-features` are plain
+;; boolean flags checked separately with `arg_has`.
+pub fn parse_features_flag(raw_values: [string], raw_count: int) -> [string] is
+    let mut result: [string] = []
+    let mut i: int = 0
+    while i < raw_count is
+        let parts: [string] = string_split(raw_values[i], ",")
+        let mut j: int = 0
+        while j < array_len(parts) is
+            let f: string = string_trim(parts[j])
+            if f != "" is result = array_push(result, f) end
+            j += 1
+        end
+        i += 1
+    end
+    return result
+end
+
+fn string_join_commas(items: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(items) is
+        if out != "" is out = out + ", " end
+        out = out + items[i]
+        i += 1
+    end
+    return out
+end
+
 ;; ── Help ─────────────────────────────────────────────────────────────────────
 
 pub fn print_header() is
@@ -97,6 +132,7 @@ pub fn print_help() is
     write("    \x1b[36mbuild\x1b[0m     [--release] [-v]        compile project")
     write("    \x1b[36mrun\x1b[0m       [--release] [-- args]   build and run")
     write("    \x1b[36mcheck\x1b[0m     [-v]                    type-check only")
+    write("    \x1b[36mfeatures\x1b[0m                          list [features] from Bytes.hk")
     write("    \x1b[36mclean\x1b[0m     [--everything]          remove build/")
     write("    \x1b[36mtest\x1b[0m      [filter]                run #[test] blocks")
     write("    \x1b[36mfmt\x1b[0m       [files...]              format .h# files")
@@ -122,6 +158,7 @@ pub fn print_help() is
     write("    \x1b[36m--version\x1b[0m | -V                   show version")
     write("")
     write("  \x1b[2mFlags: --release (-r)  --verbose (-v)  --file (-f) <file>\x1b[0m")
+    write("  \x1b[2m       --features <a,b>  --all-features  --no-default-features\x1b[0m")
     write("")
 end
 
@@ -170,9 +207,23 @@ pub fn cmd_new(name: string, is_lib: bool, is_ws: bool) is
     write("")
 end
 
-pub fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool) is
+;; [FEATURES] `requested_features`/`no_default`/`all_features` come
+;; straight from main.h#'s `--features`/`--no-default-features`/
+;; `--all-features` parsing. Resolution happens once, here, and the
+;; result is what both the dep installer and the generated
+;; `bytes_features` module (see build.h#'s `build_single`) see — so a
+;; single `bytes build --features x` run is internally consistent about
+;; what "enabled" means, from dependency selection through to the
+;; runtime `has_feature("x")` check.
+pub fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool,
+                  requested_features: [string], no_default: bool, all_features: bool) is
     print_header()
     let proj: config::Project = config::load()
+    let enabled: [string] = config::resolve_features(proj, requested_features, no_default, all_features)
+
+    if array_len(requested_features) > 0 || no_default || all_features is
+        write("  \x1b[2mFeatures:\x1b[0m " + if array_len(enabled) == 0 then "(none)" else string_join_commas(enabled) )
+    end
 
     if proj.has_workspace is
         ;; Set workspace root for member builds
@@ -212,11 +263,13 @@ pub fn cmd_build(extra: [string], extra_count: int, release: bool, verbose: bool
     if !dir_exists("build") is dir_create("build") end
     if !dir_exists("build/cache") is dir_create("build/cache") end
 
-    ;; Install deps first
-    if config::dep_count(proj) > 0 is
+    ;; Install deps first (feature-filtered — see cmd_build's doc comment)
+    let wanted_deps: [string] = config::enabled_dep_names(proj, enabled)
+    if array_len(wanted_deps) > 0 is
         let cache: isolation::BytesCache = isolation::bytes_cache_open()
-        installer::install_all(proj, release, verbose)
+        installer::install_all_with_features(proj, release, verbose, wanted_deps)
     end
+    file_write("build/cache/bytes_features.h#", config::gen_feature_module(enabled))
 
     ;; Check for --emit flag
     let mut emit_arg: string = ""
@@ -331,7 +384,7 @@ pub fn cmd_remove(pkg: string) is
     installer::cmd_remove_dep(pkg)
 end
 
-pub fn cmd_install(verbose: bool, release: bool) is
+pub fn cmd_install(verbose: bool, release: bool, requested_features: [string], no_default: bool, all_features: bool) is
     print_header()
     let proj: config::Project = config::load()
 
@@ -340,7 +393,14 @@ pub fn cmd_install(verbose: bool, release: bool) is
         return
     end
 
-    installer::install_all(proj, release, verbose)
+    let enabled: [string] = config::resolve_features(proj, requested_features, no_default, all_features)
+    let wanted:  [string] = config::enabled_dep_names(proj, enabled)
+    if array_len(wanted) == 0 is
+        write("  \x1b[2mNothing to install for the selected feature set.\x1b[0m")
+        return
+    end
+    installer::install_all_with_features(proj, release, verbose, wanted)
+    file_write("build/cache/bytes_features.h#", config::gen_feature_module(enabled))
 end
 
 pub fn cmd_update() is
@@ -385,12 +445,55 @@ pub fn cmd_list() is
             "invalid" => "\x1b[31minvalid\x1b[0m"
             _         => "\x1b[32mbytes\x1b[0m"
         end
+        let opt_tag: string = if config::dep_optional(dep) then "  \x1b[2m(optional)\x1b[0m" else "" 
         write("  " + string_pad_right(dep_name, 24) + " " + kind_col +
               if dep_src != dep_kind && dep_src != "" then
                 "  \x1b[2m" + dep_src + "\x1b[0m"
-              else "" end)
+              else "" end + opt_tag)
         i += 1
     end
+    write("")
+end
+
+;; [FEATURES] `bytes features` — lists every `[features]` entry declared
+;; in Bytes.hk plus what each one turns on, and marks which ones are
+;; part of the default set. Doesn't touch the network or build/cache/,
+;; unlike `cmd_build`/`cmd_install` — purely reads the parsed project.
+pub fn cmd_features() is
+    print_header()
+    let proj: config::Project = config::load()
+    let n: int = config::feature_count(proj)
+
+    if n == 0 is
+        write("  \x1b[2m(no [features] declared in Bytes.hk)\x1b[0m")
+        write("")
+        return
+    end
+
+    let defaults: [string] = config::default_features(proj)
+    write("  \x1b[1mFeatures:\x1b[0m " + config::pkg_name(proj))
+    write("")
+    let mut i: int = 0
+    while i < n is
+        let f: config::FeatureEntry = config::feature_at(proj, i)
+        let name: string = config::feature_name(f)
+        let reqs: [string] = config::feature_requires(f)
+        let is_default: bool = name == "default"
+        let mut in_default: bool = is_default
+        let mut di: int = 0
+        while di < array_len(defaults) is
+            if defaults[di] == name is in_default = true end
+            di += 1
+        end
+        let tag: string = if in_default then "  \x1b[32m(default)\x1b[0m" else "" 
+        write("  \x1b[36m" + string_pad_right(name, 20) + "\x1b[0m " +
+              (if array_len(reqs) == 0 then "\x1b[2m(no extra requires)\x1b[0m" else string_join_commas(reqs) ) + tag)
+        i += 1
+    end
+    write("")
+    write("  \x1b[2mUse: bytes build --features name1,name2\x1b[0m")
+    write("  \x1b[2m     bytes build --all-features\x1b[0m")
+    write("  \x1b[2m     bytes build --no-default-features\x1b[0m")
     write("")
 end
 
@@ -476,7 +579,13 @@ pub fn cmd_workspace(sub: string, extra: [string], extra_count: int, release: bo
             write("")
         end
         "build" => is
-            cmd_build(extra, extra_count, release, verbose)
+            ;; [FEATURES] `cmd_workspace` itself doesn't parse
+            ;; --features/--all-features/--no-default-features for its
+            ;; own subcommands (that's not implemented at the workspace
+            ;; level, only for a single-package `bytes build`) — pass
+            ;; the "nothing requested, defaults only" values through so
+            ;; this still matches `cmd_build`'s real signature.
+            cmd_build(extra, extra_count, release, verbose, [], false, false)
         end
         "list" => is
             print_header()
