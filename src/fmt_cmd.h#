@@ -59,34 +59,34 @@ pub fn format_source(src: string) -> string is
         let line:    string = lines[i]
         let trimmed: string = string_trim(line)
 
+        ;; [FIXED — same class of bug as config.h#'s parse()/resolve_features]
         if trimmed == "" is
             blank_run += 1
             if blank_run <= 1 is out = out + "\n" end
-            i += 1
-            continue
-        end
-        blank_run = 0
+        else is
+            blank_run = 0
 
-        ;; Decrease indent before closing keywords
-        if matches_closing(trimmed) && indent > 0 is
-            indent -= 1
-        end
+            ;; Decrease indent before closing keywords
+            if matches_closing(trimmed) && indent > 0 is
+                indent -= 1
+            end
 
-        ;; Build indented line
-        let mut indented: string = ""
-        let mut j: int = 0
-        while j < indent is
-            indented = indented + indent_str
-            j += 1
-        end
-        indented = indented + trimmed
+            ;; Build indented line
+            let mut indented: string = ""
+            let mut j: int = 0
+            while j < indent is
+                indented = indented + indent_str
+                j += 1
+            end
+            indented = indented + trimmed
 
-        ;; Strip trailing whitespace
-        out = out + string_trim_right(indented) + "\n"
+            ;; Strip trailing whitespace
+            out = out + string_trim_right(indented) + "\n"
 
-        ;; Increase indent after opening keywords
-        if matches_opening(trimmed) is
-            indent += 1
+            ;; Increase indent after opening keywords
+            if matches_opening(trimmed) is
+                indent += 1
+            end
         end
 
         i += 1
