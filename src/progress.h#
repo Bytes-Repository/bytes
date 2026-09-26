@@ -405,6 +405,22 @@ end
 pub fn member_success(m: MemberStatus)  -> bool   is return m.success  end
 pub fn member_bin_path(m: MemberStatus) -> string is return m.bin_path end
 
+;; Same-module constructor for cross-module callers (`workspace.h#`'s
+;; `build_member`, which returns `progress::MemberStatus`). A bare
+;; `MemberStatus { ... }` struct literal built OUTSIDE this module
+;; doesn't get resolved against this declaration — the compiler treats
+;; it as a same-named-but-distinct local type, hence `workspace.h#`'s
+;; "return type mismatch... expected `progress_MemberStatus`, found
+;; `MemberStatus`" (the mangled names make the two-different-types
+;; diagnosis explicit). Building it here instead, where the struct is
+;; actually declared, and having `workspace.h#` call this rather than
+;; write the literal itself, sidesteps that entirely — the same fix
+;; shape this file already uses for cross-module *reads* (see
+;; `member_success`/`member_bin_path` above), just for *construction*.
+pub fn member_status_new(name: string, lang: string, success: bool, output: string, elapsed: int, bin_path: string) -> MemberStatus is
+    return MemberStatus { name: name, lang: lang, success: success, output: output, elapsed: elapsed, bin_path: bin_path }
+end
+
 pub fn print_member(m: MemberStatus) is
     let icon:    string = if m.success then "\x1b[32m✓\x1b[0m" else "\x1b[31mx\x1b[0m" 
     let time_s:  string = elapsed_str(m.elapsed)
