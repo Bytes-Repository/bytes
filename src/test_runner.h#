@@ -45,14 +45,16 @@ fn collect_test_files(extra: [string], extra_count: int) -> [string] is
     let mut i: int = 0
     while i < n is
         let l: string = string_trim(lines[i])
-        if l == "" is i += 1 continue end
-        let mut dup: bool = false
-        let mut j: int = 0
-        while j < array_len(result) is
-            if result[j] == l is dup = true end
-            j += 1
+        ;; [FIXED — same class of bug as config.h#'s parse()/resolve_features]
+        if l != "" is
+            let mut dup: bool = false
+            let mut j: int = 0
+            while j < array_len(result) is
+                if result[j] == l is dup = true end
+                j += 1
+            end
+            if !dup is result = array_push(result, l) end
         end
-        if !dup is result = array_push(result, l) end
         i += 1
     end
     return result
@@ -122,51 +124,55 @@ pub fn cmd_test(extra: [string], extra_count: int, filter: string, verbose: bool
 
     while i < n is
         let file: string = files[i]
-        if !file_exists(file) is i += 1 continue end
 
-        let content: string    = file_read(file)
-        let tests:   [string]  = extract_test_names(content)
-        let tn:      int       = array_len(tests)
+        ;; [FIXED — same class of bug as config.h#'s parse()/resolve_features
+        ;; and install_hsharp_deps above: three `continue`s here used to sit
+        ;; before later `let`s in the same loop body(ies). Restructured as
+        ;; nested `if`, `i += 1`/`j += 1` unconditional at the end of each
+        ;; loop instead of inline before each `continue`.
+        if file_exists(file) is
+            let content: string    = file_read(file)
+            let tests:   [string]  = extract_test_names(content)
+            let tn:      int       = array_len(tests)
 
-        if tn == 0 is i += 1 continue end
+            if tn > 0 is
+                write("  \x1b[2m" + file + "\x1b[0m")
+                total_files += 1
 
-        write("  \x1b[2m" + file + "\x1b[0m")
-        total_files += 1
+                let mut j: int = 0
+                while j < tn is
+                    let test_name: string = tests[j]
 
-        let mut j: int = 0
-        while j < tn is
-            let test_name: string = tests[j]
+                    ;; Apply filter
+                    let matches_filter: bool = filter == "" || string_contains(test_name, filter)
+                    if matches_filter is
+                        let res: TestResult = run_single_test(file, test_name, verbose)
 
-            ;; Apply filter
-            if filter != "" && !string_contains(test_name, filter) is
-                j += 1
-                continue
-            end
-
-            let res: TestResult = run_single_test(file, test_name, verbose)
-
-            if res.passed is
-                write("  \x1b[32m✓\x1b[0m  " + test_name +
-                      "  \x1b[2m(" + to_string(res.elapsed) + "ms)\x1b[0m")
-                total_passed += 1
-            else is
-                write("  \x1b[31m✗\x1b[0m  " + test_name +
-                      "  \x1b[2m(" + to_string(res.elapsed) + "ms)\x1b[0m")
-                if res.output != "" && (verbose || total_failed < 3) is
-                    let out_lines: [string] = string_split(res.output, "\n")
-                    let on:        int      = array_len(out_lines)
-                    let mut k: int = 0
-                    while k < on && k < 8 is
-                        let l: string = string_trim(out_lines[k])
-                        if l != "" is write("       \x1b[31m" + l + "\x1b[0m") end
-                        k += 1
+                        if res.passed is
+                            write("  \x1b[32m✓\x1b[0m  " + test_name +
+                                  "  \x1b[2m(" + to_string(res.elapsed) + "ms)\x1b[0m")
+                            total_passed += 1
+                        else is
+                            write("  \x1b[31m✗\x1b[0m  " + test_name +
+                                  "  \x1b[2m(" + to_string(res.elapsed) + "ms)\x1b[0m")
+                            if res.output != "" && (verbose || total_failed < 3) is
+                                let out_lines: [string] = string_split(res.output, "\n")
+                                let on:        int      = array_len(out_lines)
+                                let mut k: int = 0
+                                while k < on && k < 8 is
+                                    let l: string = string_trim(out_lines[k])
+                                    if l != "" is write("       \x1b[31m" + l + "\x1b[0m") end
+                                    k += 1
+                                end
+                            end
+                            total_failed += 1
+                        end
                     end
+                    j += 1
                 end
-                total_failed += 1
+                write("")
             end
-            j += 1
         end
-        write("")
         i += 1
     end
 
