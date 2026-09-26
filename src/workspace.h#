@@ -476,51 +476,51 @@ pub fn build_workspace(proj: config::Project, release: bool, verbose: bool) -> i
 
     while i < order_n is
         let member: string = string_trim(order[i])
-        if member == "" is i += 1 continue end
 
-        let lang: string = config::ws_member_lang(proj, member)
+        ;; [FIXED — same class of bug as config.h#'s parse()/resolve_features]
+        if member != "" is
+            let lang: string = config::ws_member_lang(proj, member)
 
-        ;; Skip if toolchain missing
-        let mut skip: bool = false
-        let mut mi: int = 0
-        while mi < array_len(missing_langs) is
-            if missing_langs[mi] == lang is skip = true end
-            mi += 1
-        end
+            ;; Skip if toolchain missing
+            let mut skip: bool = false
+            let mut mi: int = 0
+            while mi < array_len(missing_langs) is
+                if missing_langs[mi] == lang is skip = true end
+                mi += 1
+            end
 
-        if skip is
-            progress::bar_clear()
-            write("  \x1b[33m-\x1b[0m " + string_pad_right(member, 20) + " \x1b[2mskipped (no toolchain)\x1b[0m")
-            wsbar = progress::bar_inc(wsbar, 1)
-            i += 1
-            continue
-        end
+            if skip is
+                progress::bar_clear()
+                write("  \x1b[33m-\x1b[0m " + string_pad_right(member, 20) + " \x1b[2mskipped (no toolchain)\x1b[0m")
+                wsbar = progress::bar_inc(wsbar, 1)
+            else is
+                ;; Relinquish the pinned bottom line to build_member's own
+                ;; per-file spinner while it compiles (same row, same idea —
+                ;; only one "live" indicator owns that line at a time), then
+                ;; take it back once the member's result line has scrolled up.
+                progress::bar_clear()
+                let res: progress::MemberStatus = build_member(member, lang, release, verbose)
+                progress::print_member(res)
+                wsbar = progress::bar_inc(wsbar, 1)
 
-        ;; Relinquish the pinned bottom line to build_member's own
-        ;; per-file spinner while it compiles (same row, same idea —
-        ;; only one "live" indicator owns that line at a time), then
-        ;; take it back once the member's result line has scrolled up.
-        progress::bar_clear()
-        let res: progress::MemberStatus = build_member(member, lang, release, verbose)
-        progress::print_member(res)
-        wsbar = progress::bar_inc(wsbar, 1)
+                if progress::member_success(res) is passed += 1 else failed += 1 end
+                results = array_push(results, res)
 
-        if progress::member_success(res) is passed += 1 else failed += 1 end
-        results = array_push(results, res)
-
-        ;; EXPANSION: also collect this member's binary into one shared
-        ;; top-level `build/` directory at the workspace root — the
-        ;; Cargo-`target/{debug,release}/`-style single place every
-        ;; workspace binary ends up, instead of only under its own
-        ;; `<member>/build/...`  (which still exists too — this is a
-        ;; copy, not a move, so nothing that already depended on the
-        ;; per-member path breaks).
-        let res_bin_path: string = progress::member_bin_path(res)
-        if progress::member_success(res) && res_bin_path != "" && file_exists(res_bin_path) is
-            let ws_build_dir: string = if ws_root != "" then ws_root + "/build" else "build" 
-            if !dir_exists(ws_build_dir) is dir_create(ws_build_dir) end
-            let collected: string = ws_build_dir + "/" + path_basename(res_bin_path)
-            system("cp -f " + sh_quote(res_bin_path) + " " + sh_quote(collected))
+                ;; EXPANSION: also collect this member's binary into one shared
+                ;; top-level `build/` directory at the workspace root — the
+                ;; Cargo-`target/{debug,release}/`-style single place every
+                ;; workspace binary ends up, instead of only under its own
+                ;; `<member>/build/...`  (which still exists too — this is a
+                ;; copy, not a move, so nothing that already depended on the
+                ;; per-member path breaks).
+                let res_bin_path: string = progress::member_bin_path(res)
+                if progress::member_success(res) && res_bin_path != "" && file_exists(res_bin_path) is
+                    let ws_build_dir: string = if ws_root != "" then ws_root + "/build" else "build" 
+                    if !dir_exists(ws_build_dir) is dir_create(ws_build_dir) end
+                    let collected: string = ws_build_dir + "/" + path_basename(res_bin_path)
+                    system("cp -f " + sh_quote(res_bin_path) + " " + sh_quote(collected))
+                end
+            end
         end
         i += 1
     end
