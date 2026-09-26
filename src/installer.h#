@@ -10,10 +10,45 @@ end
 fn pkg_cache_dir() -> string is return "build/cache/packages" end
 fn py_cache_dir()  -> string is return "build/cache/pyenv"    end
 
-pub fn install_all(proj: config::Project, release: bool, verbose: bool) -> bool is
-    let ok_hsh: bool = install_hsharp_deps(proj, verbose)
+;; [FEATURES] `enabled_deps` is the dep-name allowlist computed by
+;; `config::enabled_dep_names` from the resolved --features set — every
+;; non-optional dep plus whichever optional ones the active features
+;; turned on. Skips installing/building anything not on that list, so
+;; `bytes build` without extra flags never pulls an optional dep whose
+;; feature wasn't enabled.
+pub fn install_all_with_features(proj: config::Project, release: bool, verbose: bool, enabled_deps: [string]) -> bool is
+    let ok_hsh: bool = install_hsharp_deps(proj, verbose, enabled_deps)
     let ok_py:  bool = install_python_deps(proj, verbose)
     return ok_hsh && ok_py
+end
+
+;; Back-compat entry point for any caller that hasn't been updated to
+;; pass a resolved feature set yet — behaves exactly like before
+;; --features existed: every declared dep is installed, since a project
+;; with no `[features]`/`optional` markers has `enabled_dep_names` equal
+;; to "all deps" anyway.
+pub fn install_all(proj: config::Project, release: bool, verbose: bool) -> bool is
+    let all_names: [string] = all_dep_names(proj)
+    return install_all_with_features(proj, release, verbose, all_names)
+end
+
+fn all_dep_names(proj: config::Project) -> [string] is
+    let mut names: [string] = []
+    let mut i: int = 0
+    while i < config::dep_count(proj) is
+        names = array_push(names, config::dep_name(config::dep_at(proj, i)))
+        i += 1
+    end
+    return names
+end
+
+fn in_list(names: [string], name: string) -> bool is
+    let mut i: int = 0
+    while i < array_len(names) is
+        if names[i] == name is return true end
+        i += 1
+    end
+    return false
 end
 
 ;; ── H# zależności ─────────────────────────────────────────────────────────────
@@ -46,8 +81,15 @@ struct InstallOutcome is
     pub note: string
 end
 
-fn install_hsharp_deps(proj: config::Project, verbose: bool) -> bool is
-    let total: int = config::dep_count(proj)
+fn install_hsharp_deps(proj: config::Project, verbose: bool, enabled_deps: [string]) -> bool is
+    let total_all: int = config::dep_count(proj)
+    if total_all == 0 is return true end
+
+    ;; [FEATURES] Count/iterate only the deps this feature set actually
+    ;; wants — an optional dep whose feature isn't enabled is skipped
+    ;; entirely (not even a "(cached)"/progress row for it), same as
+    ;; Cargo never touching a disabled optional dependency.
+    let total: int = array_len(enabled_deps)
     if total == 0 is return true end
 
     if !dir_exists(pkg_cache_dir()) is dir_create(pkg_cache_dir()) end
@@ -59,62 +101,75 @@ fn install_hsharp_deps(proj: config::Project, verbose: bool) -> bool is
 
     mb = progress::multibar_set_action(mb, to_string(total) + " dependency(ies)…")
 
-    while i < total is
+    while i < total_all is
         let dep:      config::DepEntry = config::dep_at(proj, i)
         let dep_name: string = config::dep_name(dep)
         let dep_kind: string = config::dep_kind(dep)
         let dep_src:  string = config::dep_source(dep)
 
-        ;; Check cache first — a `path` dep is the one exception: it's
-        ;; meant to always track the local source live (see
-        ;; `install_path_dep`), so it re-links every time rather than
-        ;; trusting a stale lockfile entry.
-        let cached_path: string = pkg_cache_dir() + "/" + dep_name
-        let locked: lockfile::LockedPkg = lockfile::lockfile_get(lf, dep_name)
+        ;; [FIXED — same class of bug as `resolve_features` in config.h#]
+        ;; Both this feature-filter check AND the pre-existing
+        ;; "already cached" check below used to `continue` past several
+        ;; more `let`s further down in the same loop body (`cached_path`,
+        ;; `locked`, `result`...), which is exactly the shape that
+        ;; triggered the LLVM verifier's "Instruction does not dominate
+        ;; all uses!" — a codegen `alloca`-placement bug, not something
+        ;; wrong with this logic, but far cheaper to route around here
+        ;; than to patch in the compiler. Restructured as nested
+        ;; `if/else` wrapping the rest of the iteration, with `i += 1`
+        ;; unconditionally at the very end instead of inline before each
+        ;; `continue` — same control flow, no early loop-body exits at all.
+        if in_list(enabled_deps, dep_name) is
+            ;; Check cache first — a `path` dep is the one exception: it's
+            ;; meant to always track the local source live (see
+            ;; `install_path_dep`), so it re-links every time rather than
+            ;; trusting a stale lockfile entry.
+            let cached_path: string = pkg_cache_dir() + "/" + dep_name
+            let locked: lockfile::LockedPkg = lockfile::lockfile_get(lf, dep_name)
+            let already_cached: bool = lockfile::locked_name(locked) != "" && dir_exists(cached_path) && dep_kind != "path"
 
-        if lockfile::locked_name(locked) != "" && dir_exists(cached_path) && dep_kind != "path" is
-            mb = progress::multibar_set_action(mb, dep_name + " (cached)")
-            if verbose is progress::multibar_log(mb, "  \x1b[2m" + dep_name + " (cached)\x1b[0m") end
-            mb = progress::multibar_inc(mb, 1)
-            i += 1
-            continue
-        end
+            if already_cached is
+                mb = progress::multibar_set_action(mb, dep_name + " (cached)")
+                if verbose is progress::multibar_log(mb, "  \x1b[2m" + dep_name + " (cached)\x1b[0m") end
+                mb = progress::multibar_inc(mb, 1)
+            else is
+                mb = progress::multibar_set_action(mb, dep_name + match dep_kind is
+                    "git"                 => " (cloning…)"
+                    "path"                => " (linking local path…)"
+                    "version"             => " (fetching " + dep_src + "…)"
+                    "newest"              => " (syncing to newest…)"
+                    "dynamic" | "static"  => " (checking system lib…)"
+                    _                     => " (registry lookup…)"
+                end)
 
-        mb = progress::multibar_set_action(mb, dep_name + match dep_kind is
-            "git"                 => " (cloning…)"
-            "path"                => " (linking local path…)"
-            "version"             => " (fetching " + dep_src + "…)"
-            "newest"              => " (syncing to newest…)"
-            "dynamic" | "static"  => " (checking system lib…)"
-            _                     => " (registry lookup…)"
-        end)
+                ;; Fetch from registry, git, or the local filesystem
+                let result: InstallOutcome = match dep_kind is
+                    "git" => is install_git_dep(dep_name, dep_src, cached_path, verbose) end
+                    "path" => is install_path_dep(dep_name, dep_src, cached_path, verbose) end
+                    "bytes" => is install_bytes_dep(dep_name, cached_path, verbose) end
+                    "version" => is install_bytes_dep_pinned(dep_name, dep_src, cached_path, verbose) end
+                    "newest" => is install_bytes_dep_newest(dep_name, cached_path, verbose) end
+                    "dynamic" | "static" => is
+                        ;; System library — verify with pkg-config, no download needed
+                        InstallOutcome { ok: true, note: if verbose then "  \x1b[2m" + dep_name + " (system lib)\x1b[0m" else "" }
+                    end
+                    _ => is
+                        InstallOutcome { ok: true, note: if verbose then "  \x1b[2m" + dep_name + " (unknown kind " + dep_kind + ")\x1b[0m" else "" }
+                    end
+                end
 
-        ;; Fetch from registry, git, or the local filesystem
-        let result: InstallOutcome = match dep_kind is
-            "git" => is install_git_dep(dep_name, dep_src, cached_path, verbose) end
-            "path" => is install_path_dep(dep_name, dep_src, cached_path, verbose) end
-            "bytes" => is install_bytes_dep(dep_name, cached_path, verbose) end
-            "version" => is install_bytes_dep_pinned(dep_name, dep_src, cached_path, verbose) end
-            "newest" => is install_bytes_dep_newest(dep_name, cached_path, verbose) end
-            "dynamic" | "static" => is
-                ;; System library — verify with pkg-config, no download needed
-                InstallOutcome { ok: true, note: if verbose then "  \x1b[2m" + dep_name + " (system lib)\x1b[0m" else "" }
+                if result.note != "" is progress::multibar_log(mb, result.note) end
+
+                if result.ok is
+                    lf = lockfile::lockfile_lock(lf, dep_name, dep_src, dep_src, "")
+                else is
+                    progress::multibar_log(mb, "  \x1b[33mwarn:\x1b[0m  failed to fetch " + dep_name)
+                    failed += 1
+                end
+
+                mb = progress::multibar_inc(mb, 1)
             end
-            _ => is
-                InstallOutcome { ok: true, note: if verbose then "  \x1b[2m" + dep_name + " (unknown kind " + dep_kind + ")\x1b[0m" else "" }
-            end
         end
-
-        if result.note != "" is progress::multibar_log(mb, result.note) end
-
-        if result.ok is
-            lf = lockfile::lockfile_lock(lf, dep_name, dep_src, dep_src, "")
-        else is
-            progress::multibar_log(mb, "  \x1b[33mwarn:\x1b[0m  failed to fetch " + dep_name)
-            failed += 1
-        end
-
-        mb = progress::multibar_inc(mb, 1)
         i += 1
     end
 
