@@ -15,6 +15,16 @@ fn main() is
     let mut cmd:     string = ""
     let mut extra:   [string] = []
 
+    ;; [FEATURES] `--features` is repeatable and/or comma-separated
+    ;; (`--features a,b --features c` == `--features a,b,c`); raw values
+    ;; are collected here and only turned into a flat feature list by
+    ;; `cli::parse_features_flag` once parsing is done, same split
+    ;; between "collect raw args" and "interpret them" main.h# already
+    ;; uses for `extra`/`cmd`.
+    let mut raw_features: [string] = []
+    let mut no_default_features: bool = false
+    let mut all_features: bool = false
+
     let mut i: int = 1  ;; skip argv[0] (binary name)
     while i < argc is
         let a: string = args[i]
@@ -26,6 +36,12 @@ fn main() is
             "--file"    | "-f" => is
                 i += 1
                 if i < argc is file = args[i] end
+            end
+            "--all-features"        => is all_features = true end
+            "--no-default-features" => is no_default_features = true end
+            "--features" => is
+                i += 1
+                if i < argc is raw_features = array_push(raw_features, args[i]) end
             end
             _ => is
                 if string_starts_with(a, "-") is
@@ -46,6 +62,7 @@ fn main() is
     end
 
     let extra_count: int = array_len(extra)
+    let features: [string] = cli::parse_features_flag(raw_features, array_len(raw_features))
 
     match cmd is
         "new" => is
@@ -61,7 +78,10 @@ fn main() is
             cli::cmd_new(name, is_lib, is_ws)
         end
         "build" => is
-            cli::cmd_build(extra, extra_count, release, verbose)
+            cli::cmd_build(extra, extra_count, release, verbose, features, no_default_features, all_features)
+        end
+        "features" => is
+            cli::cmd_features()
         end
         "run" => is
             let run_file:  string   = if file != "" then file
@@ -125,7 +145,7 @@ fn main() is
             cli::cmd_remove(pkg)
         end
         "install" => is
-            cli::cmd_install(verbose, release)
+            cli::cmd_install(verbose, release, features, no_default_features, all_features)
         end
         "update" => is
             cli::cmd_update()
