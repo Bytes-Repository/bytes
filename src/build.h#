@@ -24,7 +24,12 @@ fn capture(cmd: string) -> string is
     return out
 end
 
-pub fn build_single(proj: config::Project, release: bool, verbose: bool) -> int is
+;; [FEATURES] `enabled_features` is the already-resolved set from
+;; `config::resolve_features` (see cli::cmd_build) — build_single itself
+;; never re-resolves --features flags, it just installs the matching
+;; deps and drops the generated `bytes_features` lookup module (see
+;; config.h#'s `gen_feature_module` doc comment) into build/cache/.
+pub fn build_single(proj: config::Project, release: bool, verbose: bool, enabled_features: [string]) -> int is
     let hsh:   string = find_hsh()
     let entry: string = config::build_entry(proj)
     let out:   string = config::build_output(proj)
@@ -32,10 +37,12 @@ pub fn build_single(proj: config::Project, release: bool, verbose: bool) -> int 
     if !dir_exists("build") is dir_create("build") end
     if !dir_exists("build/cache") is dir_create("build/cache") end
 
-    ;; Install deps
+    ;; Install deps (feature-filtered) + drop the generated feature-query module
     if config::dep_count(proj) > 0 is
-        installer::install_all(proj, release, verbose)
+        let wanted: [string] = config::enabled_dep_names(proj, enabled_features)
+        installer::install_all_with_features(proj, release, verbose, wanted)
     end
+    file_write("build/cache/bytes_features.h#", config::gen_feature_module(enabled_features))
 
     let emit_arg:  string = if proj.build.emit != "" && proj.build.emit != "bin" then
                                " --emit " + proj.build.emit else ""
