@@ -263,15 +263,17 @@ pub fn cmd_doc(out_dir_arg: string, verbose: bool) -> int is
 
     while i < fn_count is
         let file: string = files[i]
-        if !file_exists(file) is i += 1 continue end
-        let src:   string   = file_read(file)
-        let items: [DocItem] = extract_doc_items(src, file)
-        let ni:    int      = array_len(items)
-        let mut j: int = 0
-        while j < ni is
-            all_items   = array_push(all_items, items[j])
-            total_count += 1
-            j += 1
+        ;; [FIXED — same class of bug as config.h#'s parse()/resolve_features]
+        if file_exists(file) is
+            let src:   string   = file_read(file)
+            let items: [DocItem] = extract_doc_items(src, file)
+            let ni:    int      = array_len(items)
+            let mut j: int = 0
+            while j < ni is
+                all_items   = array_push(all_items, items[j])
+                total_count += 1
+                j += 1
+            end
         end
         i += 1
     end
