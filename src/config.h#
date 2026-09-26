@@ -36,9 +36,33 @@ pub struct BuildConfig is
 end
 
 pub struct DepEntry is
-    pub name:   string
-    pub kind:   string
-    pub source: string
+    pub name:     string
+    pub kind:     string
+    pub source:   string
+    ;; [FEATURES] `true` when this dependency was declared with a
+    ;; trailing `optional` marker in [deps] (e.g. `-> serde => bytes
+    ;; optional`). An optional dep is never installed/built on its own —
+    ;; it only comes in when some enabled feature activates it, either
+    ;; via an explicit `dep:name` entry in that feature's `requires` list
+    ;; (see FeatureEntry below), or implicitly when a feature shares its
+    ;; exact name with the dep (the same "implicit feature" convention
+    ;; Cargo uses for `optional = true` deps). See `enabled_dep_names`.
+    pub optional: bool
+end
+
+;; [FEATURES] One `-> <name> => [...]` line inside `[features]`.
+;; `requires` is the raw list of tokens on the right-hand side: each is
+;; either the name of another feature in this same project (enabling it
+;; transitively pulls that feature in too — see `resolve_features`), or
+;; a `dep:<depname>` token that activates an *optional* dependency
+;; without also being a user-facing feature name of its own (mirrors
+;; Cargo's `dep:name` syntax). The feature named exactly `"default"` is
+;; not a real toggle a caller enables directly — its `requires` list is
+;; just the set turned on whenever nobody passes `--features`/
+;; `--no-default-features` overrides it; see `default_features`.
+pub struct FeatureEntry is
+    pub name:     string
+    pub requires: [string]
 end
 
 pub struct WorkspaceConfig is
@@ -65,6 +89,11 @@ pub struct Project is
     ;; `error:` + exit(1) every other missing/broken-project case already
     ;; uses.
     pub errors:        [string]
+    ;; [FEATURES] Parsed `[features]` section — see FeatureEntry. Order
+    ;; is preserved from the file (used only for `bytes features`
+    ;; listing output; resolution itself doesn't care about order).
+    pub features:       [FeatureEntry]
+    pub feature_count:  int
 end
 
 pub fn default_project() -> Project is
@@ -86,6 +115,7 @@ pub fn default_project() -> Project is
         deps: [], dep_count: 0,
         has_workspace: false, root_path: ".",
         errors: [],
+        features: [], feature_count: 0,
     }
 end
 
@@ -129,6 +159,193 @@ end
 
 pub fn dep_source(dep: DepEntry) -> string is
     return dep.source
+end
+
+pub fn dep_optional(dep: DepEntry) -> bool is
+    return dep.optional
+end
+
+;; ── Feature accessors ────────────────────────────────────────────────────────
+
+pub fn feature_count(proj: Project) -> int is
+    return proj.feature_count
+end
+
+pub fn feature_at(proj: Project, i: int) -> FeatureEntry is
+    return proj.features[i]
+end
+
+pub fn feature_name(f: FeatureEntry) -> string is
+    return f.name
+end
+
+pub fn feature_requires(f: FeatureEntry) -> [string] is
+    return f.requires
+end
+
+fn find_feature(proj: Project, name: string) -> FeatureEntry is
+    let mut i: int = 0
+    while i < proj.feature_count is
+        if proj.features[i].name == name is return proj.features[i] end
+        i += 1
+    end
+    return FeatureEntry { name: "", requires: [] }
+end
+
+pub fn has_feature_decl(proj: Project, name: string) -> bool is
+    return find_feature(proj, name).name != ""
+end
+
+;; The set of features turned on when the caller passes neither
+;; `--features` nor `--no-default-features` — i.e. the `requires` list
+;; of the `[features] -> default => [...]` entry, or `[]` if the project
+;; declares no `default` feature at all (nothing optional gets pulled
+;; in, same as a project with no `[features]` section whatsoever).
+pub fn default_features(proj: Project) -> [string] is
+    return find_feature(proj, "default").requires
+end
+
+fn string_array_contains(arr: [string], v: string) -> bool is
+    let mut i: int = 0
+    while i < array_len(arr) is
+        if arr[i] == v is return true end
+        i += 1
+    end
+    return false
+end
+
+;; [FEATURES] Expands `requested` into the full transitive closure of
+;; enabled feature names, by walking each feature's `requires` list and
+;; recursing into any entry that is itself a declared feature name
+;; (`dep:xxx` entries are left as-is in the *dependency* activation step
+;; — see `enabled_dep_names` — they are never feature names to recurse
+;; into). A worklist + `seen` set keeps this correct even if two
+;; features both require a third, or if (accidentally) a cycle exists —
+;; each feature is only ever expanded once.
+;;
+;;   --all-features           → every declared feature, ignoring
+;;                               `requested`/`no_default` entirely
+;;   --no-default-features    → `default`'s own requires are skipped
+;;                               unless also named explicitly in
+;;                               `requested`
+;;   plain `--features a,b`   → `requested` plus (unless `no_default`)
+;;                               `default_features(proj)`, transitively
+;;                               expanded
+pub fn resolve_features(proj: Project, requested: [string], no_default: bool, all_features: bool) -> [string] is
+    if all_features is
+        let mut all: [string] = []
+        let mut i: int = 0
+        while i < proj.feature_count is
+            if proj.features[i].name != "default" is
+                all = array_push(all, proj.features[i].name)
+            end
+            i += 1
+        end
+        return all
+    end
+
+    let mut worklist: [string] = []
+    let mut j: int = 0
+    while j < array_len(requested) is
+        worklist = array_push(worklist, requested[j])
+        j += 1
+    end
+    if !no_default is
+        let defs: [string] = default_features(proj)
+        let mut k: int = 0
+        while k < array_len(defs) is
+            if defs[k] != "" is worklist = array_push(worklist, defs[k]) end
+            k += 1
+        end
+    end
+
+    let mut enabled: [string] = []
+    let mut wi: int = 0
+    while wi < array_len(worklist) is
+        let name: string = worklist[wi]
+        wi += 1
+        ;; [FIXED] Rewritten without `continue` — the previous version
+        ;; used `if ... is continue end` three times before reaching a
+        ;; later `let reqs: [string] = ...`, which triggered "Instruction
+        ;; does not dominate all uses!" from the LLVM verifier (a bug in
+        ;; the codegen's `alloca` placement for `let`, not in this
+        ;; source — but working around it here is far cheaper than
+        ;; patching every affected codegen path). Plain nested
+        ;; `if/else` with a single guard flag reaches exactly the same
+        ;; outcome with no early exits out of the loop body at all.
+        let already: bool = string_array_contains(enabled, name)
+        if !already is
+            enabled = array_push(enabled, name)
+            let should_expand: bool = !string_starts_with(name, "dep:") && has_feature_decl(proj, name)
+            if should_expand is
+                ;; A `dep:x` token names an optional dependency, not
+                ;; another feature — never expanded further. An
+                ;; undeclared name is kept (so callers can warn "unknown
+                ;; feature 'x'") but likewise never expands.
+                let reqs: [string] = feature_requires(find_feature(proj, name))
+                let mut ri: int = 0
+                while ri < array_len(reqs) is
+                    worklist = array_push(worklist, reqs[ri])
+                    ri += 1
+                end
+            end
+        end
+    end
+    return enabled
+end
+
+;; [FEATURES] Given the resolved enabled-feature set, decides which
+;; `[deps]` entries should actually be installed/built this run:
+;;   - every *non*-optional dep, always (unaffected by --features,
+;;     exactly like Cargo's mandatory deps)
+;;   - an *optional* dep, only if either:
+;;       (a) some enabled feature's `requires` contains `dep:<name>`, or
+;;       (b) a feature with that dep's *exact* name is itself enabled
+;;           (Cargo's implicit same-named feature for `optional = true`)
+pub fn enabled_dep_names(proj: Project, enabled_features: [string]) -> [string] is
+    let mut activated_by_dep_token: [string] = []
+    let mut fi: int = 0
+    while fi < array_len(enabled_features) is
+        ;; `resolve_features` keeps bare `dep:x` tokens in its result
+        ;; list as-is (see its doc comment), so they show up directly
+        ;; here as well as inside any feature's own `.requires`.
+        let entry: string = enabled_features[fi]
+        if string_starts_with(entry, "dep:") is
+            activated_by_dep_token = array_push(activated_by_dep_token,
+                string_slice(entry, 4, string_len(entry)))
+        end
+        let f: FeatureEntry = find_feature(proj, entry)
+        let mut ri: int = 0
+        while ri < array_len(f.requires) is
+            let tok: string = f.requires[ri]
+            if string_starts_with(tok, "dep:") is
+                activated_by_dep_token = array_push(activated_by_dep_token,
+                    string_slice(tok, 4, string_len(tok)))
+            end
+            ri += 1
+        end
+        fi += 1
+    end
+
+    let mut result: [string] = []
+    let mut i: int = 0
+    while i < proj.dep_count is
+        let dep: DepEntry = proj.deps[i]
+        ;; [FIXED — same class of bug documented on `is_path_spec` above]
+        ;; This was originally `let wanted: bool = !dep.optional || A || B`
+        ;; split across lines with each `||` leading the next line, which
+        ;; the LLVM backend misparses as a zero-arg closure literal after
+        ;; the first line's `!dep.optional` reads as a complete
+        ;; standalone expression. Rewritten as plain sequential `if`
+        ;; checks — no multi-line boolean-operator continuation, so no
+        ;; ambiguity for the parser to trip on.
+        let mut wanted: bool = !dep.optional
+        if string_array_contains(activated_by_dep_token, dep.name) is wanted = true end
+        if string_array_contains(enabled_features, dep.name) is wanted = true end
+        if wanted is result = array_push(result, dep.name) end
+        i += 1
+    end
+    return result
 end
 
 ;; ── Parser .hk ───────────────────────────────────────────────────────────────
@@ -278,29 +495,52 @@ pub fn parse(content: string) -> Project is
         let line: string = hk_trim(lines[i])
         i += 1
 
-        if line == "" || string_starts_with(line, "!") ||
-           string_starts_with(line, ";;") || string_starts_with(line, "#") is
-            continue
-        end
+        ;; [FIXED — same class of bug fixed in `resolve_features`/
+        ;; `install_hsharp_deps` above, and possibly the actual cause of
+        ;; the LLVM verifier's reported "Instruction does not dominate
+        ;; all uses!" this time, since `bytes` itself appears to have
+        ;; never previously been run through `h# compile`/the LLVM
+        ;; backend at all (only ever as an already-built binary) — this
+        ;; exact function may be the very first place that codegen path
+        ;; ever got exercised. Four `continue`s here used to sit before
+        ;; `let key`/`let val` further down in the same loop body.
+        ;; Restructured as nested `if/else`, `i += 1` already
+        ;; unconditional above, no early loop-body exits left at all.
+        ;; Also written as individual `if` checks rather than a
+        ;; multi-line `||`/`&&` boolean expression, out of the same
+        ;; abundance of caution — untested territory either way, and
+        ;; single-line `if` conditions are unambiguously proven safe
+        ;; throughout this codebase regardless.
+        let mut is_blank_or_comment: bool = false
+        if line == "" is is_blank_or_comment = true end
+        if string_starts_with(line, "!") is is_blank_or_comment = true end
+        if string_starts_with(line, ";;") is is_blank_or_comment = true end
+        if string_starts_with(line, "#") is is_blank_or_comment = true end
 
-        if string_starts_with(line, "[") && string_ends_with(line, "]") is
-            section = string_slice(line, 1, string_len(line) - 1)
-            sub = ""
-            continue
-        end
+        if !is_blank_or_comment is
+            let mut is_section_header: bool = false
+            if string_starts_with(line, "[") is
+                if string_ends_with(line, "]") is is_section_header = true end
+            end
 
-        if !string_starts_with(line, "->") is continue end
+            if is_section_header is
+                section = string_slice(line, 1, string_len(line) - 1)
+                sub = ""
+            else is
+                if string_starts_with(line, "->") is
+                    let key: string = hk_parse_key(line)
+                    let val: string = hk_parse_value(line)
 
-        let key: string = hk_parse_key(line)
-        let val: string = hk_parse_value(line)
+                    ;; Key with no value = subsection marker
+                    let mut is_subsection_marker: bool = false
+                    if val == "" is
+                        if !string_contains(line, "=>") is is_subsection_marker = true end
+                    end
 
-        ;; Key with no value = subsection marker
-        if val == "" && !string_contains(line, "=>") is
-            sub = key
-            continue
-        end
-
-        match section is
+                    if is_subsection_marker is
+                        sub = key
+                    else is
+                        match section is
             "package" => is
                 match key is
                     "name"        => is proj.package.name        = val end
@@ -344,13 +584,26 @@ pub fn parse(content: string) -> Project is
                 end
             end
             "deps" => is
+                ;; [FEATURES] Strip a trailing ` optional` marker before
+                ;; classifying the rest of the value as before — e.g.
+                ;; `-> serde => bytes optional` or `-> old => v0.3
+                ;; optional`. The marker itself is never part of `kind`
+                ;; classification or the stored `source`. Kept as a
+                ;; single-line ternary (not split across lines) — same
+                ;; caution as `is_path_spec`'s fix above, though `if/then/
+                ;; else` itself (unlike a bare `||` continuation) isn't
+                ;; actually at risk of the closure misparse since `then`
+                ;; demands a following branch either way.
+                let is_opt: bool = string_ends_with(string_lower(hk_trim(val)), " optional")
+                let val: string = if is_opt then hk_trim(string_slice(val, 0, string_len(val) - 9)) else val 
+
                 if is_bare_git_literal(val) is
                     proj.errors = array_push(proj.errors,
                         "[deps] '" + key + " => git' is not a valid source — " +
                         "'git' alone doesn't name a repository. Use a full URL " +
                         "(e.g. 'https://github.com/owner/" + key + ".git') or " +
                         "'git@host:owner/" + key + ".git' instead.")
-                    proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: "invalid", source: val })
+                    proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: "invalid", source: val, optional: is_opt })
                     proj.dep_count += 1
                 else is
                     let kind: string = if val == "dynamic" || val == "static" then val
@@ -361,11 +614,35 @@ pub fn parse(content: string) -> Project is
                                        else if is_path_spec(val) then "path"
                                        else "bytes"
                     let source: string = if kind == "path" then path_spec_dir(val) else val 
-                    proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: kind, source: source })
+                    proj.deps      = array_push(proj.deps, DepEntry { name: key, kind: kind, source: source, optional: is_opt })
                     proj.dep_count += 1
                 end
             end
+            "features" => is
+                ;; [FEATURES] `-> name => ["a", "b", "dep:c"]`. `hk_parse_value`
+                ;; has already stripped surrounding quotes (see its own
+                ;; comment above), so by the time `val` gets here a line
+                ;; like `-> default => ["json", "dep:zlib"]` arrives as
+                ;; the literal text `[json, dep:zlib]` — strip the
+                ;; brackets, split on `,`, trim each piece, drop empties
+                ;; (`-> bare => []` is a valid "no extra requires" feature).
+                let raw: string = string_replace(string_replace(val, "[", ""), "]", "")
+                let parts: [string] = string_split(raw, ",")
+                let mut reqs: [string] = []
+                let mut pi: int = 0
+                while pi < array_len(parts) is
+                    let p: string = string_trim(parts[pi])
+                    if p != "" is reqs = array_push(reqs, p) end
+                    pi += 1
+                end
+                proj.features      = array_push(proj.features, FeatureEntry { name: key, requires: reqs })
+                proj.feature_count += 1
+            end
             _ => is end
+        end
+                    end
+                end
+            end
         end
     end
 
@@ -545,7 +822,8 @@ pub fn tpl_package(name: string) -> string is
            "-> version     => 0.1.0\n-> description => " + name + "\n" +
            "-> author      =>\n-> license     => MIT\n\n" +
            "[build]\n-> lang   => h#\n-> entry  => src/main.h#\n" +
-           "-> output => build/" + name + "\n\n[deps]\n"
+           "-> output => build/" + name + "\n\n[deps]\n\n" +
+           "[features]\n! -> default => [\"\"]\n! -> extra   => [\"dep:some_optional_dep\"]\n"
 end
 
 pub fn tpl_workspace(name: string) -> string is
@@ -577,4 +855,43 @@ end
 
 pub fn tpl_hk_gitignore() -> string is
     return "build/\nbuild/cache/\n*.jit\n*.h#bc\n"
+end
+
+;; [FEATURES] Generates a tiny H# module exposing the resolved feature
+;; set to the project's own code at runtime — the closest equivalent
+;; this toolchain has to Cargo's `cfg(feature = "x")`, since H# compile
+;; itself has no documented conditional-compilation/`--cfg` mechanism to
+;; hook into (unlike rustc). Written to `build/cache/bytes_features.h#`
+;; by `build::build_single`/`installer::install_all` on every build; a
+;; project opts in by adding `mod bytes_features` to its entry file and
+;; `-> include => build/cache` under `[build]` in Bytes.hk, then calling
+;; `bytes_features::has("json")` / `bytes_features::list()`.
+pub fn gen_feature_module(enabled: [string]) -> string is
+    let mut lines: string = ";; Auto-generated by `bytes` from the resolved --features set.\n" +
+        ";; Do not edit by hand — regenerated on every build/install.\n\n" +
+        "pub fn has(name: string) -> bool is\n    match name is\n"
+    let mut i: int = 0
+    while i < array_len(enabled) is
+        if !string_starts_with(enabled[i], "dep:") is
+            lines = lines + "        \"" + enabled[i] + "\" => is return true end\n"
+        end
+        i += 1
+    end
+    lines = lines + "        _ => is return false end\n    end\nend\n\n" +
+        "pub fn list() -> [string] is\n    return [" +
+        string_feature_list_literal(enabled) + "]\nend\n"
+    return lines
+end
+
+fn string_feature_list_literal(enabled: [string]) -> string is
+    let mut out: string = ""
+    let mut i: int = 0
+    while i < array_len(enabled) is
+        if !string_starts_with(enabled[i], "dep:") is
+            if out != "" is out = out + ", " end
+            out = out + "\"" + enabled[i] + "\""
+        end
+        i += 1
+    end
+    return out
 end
